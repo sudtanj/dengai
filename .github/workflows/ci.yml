@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --all --check || { cargo fmt --all && git diff > fmt.patch; exit 1; }
+      - name: Lockfile
+        id: lock
+        continue-on-error: true
+        run: |
+          cargo metadata --format-version 1 > /dev/null
+          git diff --exit-code Cargo.lock > /dev/null || { git diff Cargo.lock > lock.patch; exit 1; }
+      - name: Upload rustfmt / lockfile patches
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patches
+          path: |
+            fmt.patch
+            lock.patch
+          if-no-files-found: ignore
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - name: Fail on format or lockfile drift
+        if: steps.fmt.outcome == 'failure' || steps.lock.outcome == 'failure'
+        run: exit 1
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl   # Orange Pi Zero 3
+            arch: arm64
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build
+        run: cross build --release --locked --target ${{ matrix.target }}
+      - name: Binary size
+        run: |
+          ls -l target/${{ matrix.target }}/release/dengai
+          file target/${{ matrix.target }}/release/dengai
+          echo "${{ matrix.target }}: $(stat -c %s target/${{ matrix.target }}/release/dengai) bytes" >> "$GITHUB_STEP_SUMMARY"
+      - name: Package
+        run: |
+          mkdir -p dist bin/${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/dengai dist/
+          cp target/${{ matrix.target }}/release/dengai bin/${{ matrix.arch }}/
+          cp README.md LICENSE LICENSE-APACHE LICENSE-POLYFORM-NONCOMMERCIAL.md NOTICE dist/
+          tar -C dist -czf dengai-${{ matrix.target }}.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dengai-${{ matrix.target }}
+          path: dengai-${{ matrix.target }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.arch }}
+          path: bin/${{ matrix.arch }}/dengai
+
+  docker:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: artifacts
+      - name: Arrange binaries
+        run: |
+          for a in amd64 arm64; do install -D -m755 artifacts/bin-$a/dengai bin/$a/dengai; done
+          ls -l bin/*/dengai
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/dengai
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dengai-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true
