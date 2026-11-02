@@ -1,0 +1,43 @@
+dengai licensing
+================
+
+This repository contains two layers of work, under different terms.
+
+1. Original work: PolyForm Noncommercial 1.0.0
+   (SPDX: PolyForm-Noncommercial-1.0.0)
+
+   Required Notice: Copyright (c) 2026-present Sudono Tanjung (https://github.com/sudtanj)
+
+   All code in this repository authored by Sudono Tanjung is source-available
+   under the PolyForm Noncommercial License 1.0.0, the full text of which is
+   in LICENSE-POLYFORM-NONCOMMERCIAL.md.
+
+   In plain words:
+     - FREE for personal use: running it for yourself, studying it,
+       hobby projects, research, education and experimentation.
+       Noncommercial organisations (charities, schools, public research
+       bodies) are covered too, as the license defines.
+     - NOT free for commercial use. Using it in or for a business,
+       offering it as a (hosted) service, bundling it into a commercial
+       product, or using it to make money in any way needs a paid
+       commercial license from the copyright holder.
+     - Redistribution must keep this notice and the license text.
+
+   COMMERCIAL LICENSES: contact the copyright holder via
+   https://www.linkedin.com/in/sudtanj/ or https://github.com/sudtanj.
+
+2. Ported logic: Apache License 2.0
+   Parts of dengai's logic are ports (re-implementations in Rust) of:
+     - ArchiSteamFarm (https://github.com/JustArchiNET/ArchiSteamFarm),
+       Copyright 2015-2026 Lukasz "JustArchi" Domeradzki and contributors:
+       the badge-page parsing used for card farming (src/badges.rs) and the
+       handling of the free-license web endpoint's replies (src/purchase.rs).
+     - FreePackages (https://github.com/Citrinate/FreePackages),
+       Copyright Citrinate and contributors: the free-package filter rules
+       (src/pics.rs).
+   Both are licensed under the Apache License, Version 2.0, reproduced in
+   LICENSE-APACHE. Those portions remain available under the Apache License
+   2.0 as well; this file does not change that license or the rights it
+   gives. See NOTICE.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

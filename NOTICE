@@ -1,0 +1,22 @@
+dengai
+Required Notice: Copyright (c) 2026-present Sudono Tanjung (https://github.com/sudtanj)
+Original work is licensed under the PolyForm Noncommercial License 1.0.0
+(LICENSE-POLYFORM-NONCOMMERCIAL.md).
+
+This product includes logic ported from ArchiSteamFarm
+(https://github.com/JustArchiNET/ArchiSteamFarm),
+Copyright 2015-2026 Lukasz "JustArchi" Domeradzki and contributors,
+licensed under the Apache License, Version 2.0 (LICENSE-APACHE):
+  - src/badges.rs: badge page parsing (CardsFarmer selectors and rules)
+  - src/purchase.rs: classify_free_license (ArchiWebHandler.AddFreeLicense)
+
+This product includes logic ported from FreePackages
+(https://github.com/Citrinate/FreePackages), Copyright Citrinate and contributors,
+licensed under the Apache License, Version 2.0 (LICENSE-APACHE):
+  - src/pics.rs: free package filter rules (FilterablePackage, FilterableApp,
+    PackageFilter.IsRedeemablePackage / IsRedeemableApp)
+
+The ported code was rewritten in Rust and changed; it is not a copy of the
+original source files.
+
+dengai is not affiliated with Valve, Steam, ArchiSteamFarm or FreePackages.

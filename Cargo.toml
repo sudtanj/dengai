@@ -1,0 +1,40 @@
+[package]
+name = "dengai"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "dengai: a tiny single-account Steam card farmer, key redeemer and free-license claimer (ArchiSteamFarm-like) for 1 GB SBCs"
+license-file = "LICENSE"
+repository = "https://github.com/sudtanj/dengai"
+readme = "README.md"
+
+[lib]
+name = "dengai"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dengai"
+path = "src/main.rs"
+
+[dependencies]
+steam-vent = "0.5"
+steam-vent-proto = "0.5"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "net", "signal", "io-util"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
