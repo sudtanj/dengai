@@ -41,6 +41,7 @@ use tracing::{debug, error, info, warn};
 
 const RECENT: usize = 20;
 const WEB_SESSION_TTL: Duration = Duration::from_secs(6 * 3600);
+const CLOCK_TTL: Duration = Duration::from_secs(12 * 3600);
 
 /// What the API sees.
 #[derive(Debug, Default, Clone, Serialize)]
@@ -110,6 +111,8 @@ pub struct Bot {
     state: State,
     state_path: PathBuf,
     bucket: TokenBucket,
+    /// Steam clock offset (`server - local` s) and when it was measured.
+    clock: Option<(i64, Instant)>,
 }
 
 /// Per-connection state.
@@ -138,7 +141,26 @@ impl Bot {
             .map_err(|e| e.to_string())?;
         let bucket = TokenBucket::new(cfg.claims_per_hour, now());
         shared.lock().unwrap().claim_queue = state.queue.len();
-        Ok(Bot { cfg, shared, rx, http, state, state_path, bucket })
+        Ok(Bot { cfg, shared, rx, http, state, state_path, bucket, clock: None })
+    }
+
+    /// Steam's time for Steam Guard codes: the local clock plus the offset from `QueryTime`, re-measured
+    /// when older than 12 h. Falls back to the last offset, or the local clock, when the call fails.
+    // ponytail: synced from connect() (start and reconnects) rather than on a 12 h timer, since codes
+    // are only generated there.
+    async fn steam_now(&mut self) -> u64 {
+        if self.clock.is_none_or(|(_, at)| at.elapsed() > CLOCK_TTL) {
+            match crate::web::query_time(&self.http).await {
+                Ok(server) => {
+                    let offset = totp::time_offset(server, now());
+                    debug!("Steam clock offset {offset}s");
+                    self.clock = Some((offset, Instant::now()));
+                }
+                Err(e) if self.clock.is_some() => warn!("Steam time sync failed ({e}), keeping the last offset"),
+                Err(e) => warn!("Steam time sync failed ({e}), using the local clock"),
+            }
+        }
+        totp::steam_time(now(), self.clock.map_or(0, |(o, _)| o))
     }
 
     pub async fn run(mut self) {
@@ -190,8 +212,11 @@ impl Bot {
         });
     }
 
-    async fn connect(&self) -> Res<Connection> {
-        let cfg = &self.cfg;
+    async fn connect(&mut self) -> Res<Connection> {
+        let cfg = self.cfg.clone();
+        if cfg.shared_secret.is_some() {
+            self.steam_now().await;
+        }
         let servers = ServerList::discover().await.map_err(|e| format!("CM server list: {e}"))?;
         let token_path = cfg.data_dir.join("refresh_token");
         if let Ok(token) = std::fs::read_to_string(&token_path) {
@@ -203,7 +228,7 @@ impl Bot {
         let password = cfg.password.as_deref().ok_or("no saved refresh token and no password configured")?;
         let guard = FileGuardDataStore::new(cfg.data_dir.join("guard.json"));
         let code = match &cfg.shared_secret {
-            Some(s) => Some(totp::steam_code_b64(s, now())?),
+            Some(s) => Some(totp::steam_code_b64(s, self.steam_now().await)?),
             None => cfg.guard_code.clone(),
         };
         let conn = match code {

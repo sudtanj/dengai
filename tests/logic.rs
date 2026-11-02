@@ -30,6 +30,22 @@ fn totp_steam_codes() {
     assert!(totp::steam_code_b64("not base64!", 0).is_err());
 }
 
+#[test]
+fn totp_time_sync() {
+    // Local clock 40 s behind Steam: codes use Steam's time.
+    let offset = totp::time_offset(1_700_000_040, 1_700_000_000);
+    assert_eq!(offset, 40);
+    assert_eq!(totp::steam_time(1_700_000_010, offset), 1_700_000_050);
+    assert_eq!(totp::steam_time(100, totp::time_offset(70, 100)), 70);
+    assert_eq!(totp::steam_time(5, -10), 0);
+    let secret = "MTIzNDU2Nzg5MDEyMzQ1Njc4OTA=";
+    assert_eq!(totp::steam_code_b64(secret, totp::steam_time(0, offset)).unwrap(), "PV9M4");
+    let reply = r#"{"response":{"server_time":"1700000040","skew_tolerance_seconds":"60"}}"#;
+    assert_eq!(totp::parse_server_time(reply), Some(1_700_000_040));
+    assert_eq!(totp::parse_server_time(r#"{"response":{"server_time":5}}"#), Some(5));
+    assert_eq!(totp::parse_server_time("<html>"), None);
+}
+
 // ---- badge pages ----
 
 const BADGES: &str = r#"<html><script>g_steamID = "76561198000000000";</script>

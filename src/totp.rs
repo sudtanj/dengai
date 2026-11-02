@@ -34,3 +34,20 @@ pub fn steam_code_b64(shared_secret: &str, unix_time: u64) -> Result<String, Str
         .map_err(|e| format!("shared_secret is not valid base64: {e}"))?;
     Ok(steam_code(&secret, unix_time))
 }
+
+/// Offset to add to the local clock to get Steam's: `server - local` seconds.
+pub fn time_offset(server: u64, local: u64) -> i64 {
+    server as i64 - local as i64
+}
+
+/// The local Unix time corrected by a `time_offset`.
+pub fn steam_time(local: u64, offset: i64) -> u64 {
+    local.saturating_add_signed(offset)
+}
+
+/// `server_time` from an `ITwoFactorService/QueryTime` reply (Steam sends it as a string).
+pub fn parse_server_time(body: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let t = &v["response"]["server_time"];
+    t.as_u64().or_else(|| t.as_str()?.parse().ok())
+}

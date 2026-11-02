@@ -70,3 +70,16 @@ impl Web {
         }
     }
 }
+
+/// Steam's clock from `ITwoFactorService/QueryTime`, for Steam Guard codes.
+pub async fn query_time(http: &reqwest::Client) -> Result<u64, String> {
+    let resp = http
+        .post("https://api.steampowered.com/ITwoFactorService/QueryTime/v0001")
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body("steamid=0")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    dengai::totp::parse_server_time(&body).ok_or_else(|| "no server_time in the reply".to_string())
+}
