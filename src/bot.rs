@@ -5,7 +5,7 @@ use dengai::badges::{self, BadgeGame};
 use dengai::config::Config;
 use dengai::pics::{self, App, Owned, Package, Skip};
 use dengai::purchase::{self, Claim};
-use dengai::state::{State, TokenBucket};
+use dengai::state::{Id, State, TokenBucket};
 use dengai::{now, totp};
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -128,6 +128,15 @@ struct Session {
     farm_next: Instant,
     scan_next: Instant,
     blocked: bool,
+}
+
+impl Session {
+    fn owns(&self, id: Id) -> bool {
+        match id {
+            Id::Sub(n) => self.owned.packages.contains(&n),
+            Id::App(n) => self.owned.apps.contains(&n),
+        }
+    }
 }
 
 impl Bot {
@@ -386,38 +395,22 @@ impl Bot {
         let mut limited = false;
         for (i, raw) in ids.iter().enumerate() {
             let id = raw.trim();
-            let parsed =
-                id.split_once('/').and_then(|(kind, n)| Some((kind.to_ascii_lowercase(), n.parse::<u32>().ok()?)));
-            let (ok, result) = match parsed {
+            let (ok, result) = match id.parse::<Id>() {
                 _ if limited => (false, "skipped (rate limited)".to_string()),
-                Some((kind, n)) if kind == "sub" || kind == "s" => {
+                Ok(lic) => {
                     if i > 0 {
                         sleep(Duration::from_secs(self.cfg.redeem_delay_secs)).await;
                     }
-                    let claim = self.web(s).await?.add_free_license(n).await;
+                    let claim = self.claim(s, lic).await;
                     limited = claim == Claim::RateLimited;
                     if claim == Claim::Ok {
-                        self.state.done.insert(n);
-                        self.state.queue.retain(|q| *q != n);
+                        self.state.done.insert(lic);
+                        self.state.queue.retain(|q| *q != lic);
                         self.save_state();
                     }
                     (claim == Claim::Ok, claim_text(&claim))
                 }
-                Some((kind, n)) if kind == "a" || kind == "app" => {
-                    if i > 0 {
-                        sleep(Duration::from_secs(self.cfg.redeem_delay_secs)).await;
-                    }
-                    let req = CMsgClientRequestFreeLicense { appids: vec![n], ..Default::default() };
-                    let resp: CMsgClientRequestFreeLicenseResponse = s.conn.job(req).await.map_err(net)?;
-                    let r = resp.eresult() as i32;
-                    limited = r == 84; // RateLimitExceeded
-                    match (r, resp.granted_appids.is_empty() && resp.granted_packageids.is_empty()) {
-                        (1, false) => (true, format!("ok, granted subs {:?}", resp.granted_packageids)),
-                        (1, true) => (false, "nothing granted (not free, or already owned)".to_string()),
-                        _ => (false, eresult(r)),
-                    }
-                }
-                _ => (false, "invalid id, use sub/<id> or a/<id>".to_string()),
+                Err(e) => (false, e),
             };
             self.log_claim(id.to_string(), result.clone());
             out.push(ItemResult { id: id.into(), ok, result, items: vec![] });
@@ -615,7 +608,7 @@ impl Bot {
         // Doubles as the connection health check.
         let req = CMsgClientPICSChangesSinceRequest {
             since_change_number: Some(self.state.change_number),
-            send_app_info_changes: Some(false),
+            send_app_info_changes: Some(self.cfg.auto_claim && self.cfg.auto_claim_apps),
             send_package_info_changes: Some(true),
             ..Default::default()
         };
@@ -623,24 +616,19 @@ impl Bot {
         if !self.cfg.auto_claim {
             return Ok(());
         }
+        if !s.licenses_known {
+            // Wait for the license list before evaluating anything.
+            return Ok(());
+        }
         let current = resp.current_change_number();
         if current != self.state.change_number {
             if self.state.change_number == 0 || resp.force_full_update() || resp.force_full_package_update() {
                 info!("PICS: starting from change {current}");
-            } else if s.licenses_known {
-                let ids: Vec<u32> = resp
-                    .package_changes
-                    .iter()
-                    .map(|p| p.packageid())
-                    .filter(|id| !s.owned.packages.contains(id) && !self.state.known(*id))
-                    .collect();
-                debug!("PICS: {} changed packages since {}", ids.len(), self.state.change_number);
-                for chunk in ids.chunks(100) {
-                    self.evaluate(s, chunk).await?;
-                }
             } else {
-                // Wait for the license list before evaluating anything.
-                return Ok(());
+                let subs = resp.package_changes.iter().map(|p| Id::Sub(p.packageid()));
+                let ids: Vec<Id> = subs.chain(resp.app_changes.iter().map(|a| Id::App(a.appid()))).collect();
+                debug!("PICS: {} changes since {}", ids.len(), self.state.change_number);
+                self.evaluate(s, &ids).await?;
             }
             self.state.change_number = current;
             self.save_state();
@@ -648,7 +636,62 @@ impl Bot {
         self.claim_next(s).await
     }
 
-    async fn evaluate(&mut self, s: &mut Session, ids: &[u32]) -> Res<()> {
+    fn skip(&self) -> Skip {
+        Skip { demos: self.cfg.skip_demos, playtests: self.cfg.skip_playtests, unowned_dlc: self.cfg.skip_unowned_dlc }
+    }
+
+    /// Queues `id` when the filter passed. Returns 1 when it was new.
+    fn verdict(&mut self, id: Id, v: Result<(), &str>) -> usize {
+        match v {
+            Ok(()) if self.state.enqueue(id) => {
+                info!("{id}: free, queued");
+                1
+            }
+            Ok(()) => 0,
+            Err(why) => {
+                debug!("{id}: {why}");
+                0
+            }
+        }
+    }
+
+    /// Checks licenses that aren't owned or known yet with PICS product info, in batches, and queues
+    /// the claimable ones. Apps are dropped unless `auto_claim_apps`.
+    async fn evaluate(&mut self, s: &mut Session, ids: &[Id]) -> Res<()> {
+        let fresh = |id: &&Id| !s.owns(**id) && !self.state.known(**id);
+        let pick = |want_app: bool| -> Vec<u32> {
+            let mut v: Vec<u32> = ids
+                .iter()
+                .filter(fresh)
+                .filter_map(|id| match *id {
+                    Id::Sub(n) if !want_app => Some(n),
+                    Id::App(n) if want_app => Some(n),
+                    _ => None,
+                })
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let subs = pick(false);
+        let apps = if self.cfg.auto_claim_apps { pick(true) } else { Vec::new() };
+        let mut added = 0;
+        for chunk in subs.chunks(100) {
+            added += self.evaluate_subs(s, chunk).await?;
+        }
+        let skip = self.skip();
+        for chunk in apps.chunks(50) {
+            for app in self.product_info(s, &[], chunk).await?.1.values() {
+                added += self.verdict(Id::App(app.id), pics::check_app(app, &s.owned, skip));
+            }
+        }
+        if added > 0 {
+            self.save_state();
+        }
+        Ok(())
+    }
+
+    async fn evaluate_subs(&mut self, s: &mut Session, ids: &[u32]) -> Res<usize> {
         let (packages, _) = self.product_info(s, ids, &[]).await?;
         let now = now();
         let candidates: Vec<Package> = packages
@@ -661,9 +704,6 @@ impl Bot {
                 }
             })
             .collect();
-        if candidates.is_empty() {
-            return Ok(());
-        }
         let mut app_ids: Vec<u32> = candidates.iter().flat_map(|p| p.app_ids.iter().copied()).collect();
         app_ids.sort_unstable();
         app_ids.dedup();
@@ -671,34 +711,40 @@ impl Bot {
         for chunk in app_ids.chunks(50) {
             apps.extend(self.product_info(s, &[], chunk).await?.1);
         }
-        let skip = Skip {
-            demos: self.cfg.skip_demos,
-            playtests: self.cfg.skip_playtests,
-            unowned_dlc: self.cfg.skip_unowned_dlc,
-        };
-        let mut added = false;
+        let skip = self.skip();
+        let mut added = 0;
         for p in candidates {
             let contents: Vec<App> = p.app_ids.iter().filter_map(|id| apps.get(id).cloned()).collect();
-            match pics::check_apps(&p, &contents, &s.owned, skip) {
-                Ok(()) => {
-                    if self.state.enqueue(p.id) {
-                        info!("sub/{}: free, queued", p.id);
-                        added = true;
-                    }
-                }
-                Err(why) => debug!("sub/{}: {why}", p.id),
-            }
+            added += self.verdict(Id::Sub(p.id), pics::check_apps(&p, &contents, &s.owned, skip));
         }
-        if added {
-            self.save_state();
-        }
-        Ok(())
+        Ok(added)
     }
 
-    /// Claims at most one queued package per call, within the token bucket.
+    /// One free-license request: `sub/` through the store, `a/` through `CMsgClientRequestFreeLicense`.
+    async fn claim(&self, s: &mut Session, id: Id) -> Claim {
+        match id {
+            Id::Sub(n) => match self.web(s).await {
+                Ok(web) => web.add_free_license(n).await,
+                Err(e) => Claim::Retry(e),
+            },
+            Id::App(n) => {
+                let req = CMsgClientRequestFreeLicense { appids: vec![n], ..Default::default() };
+                let resp: Result<CMsgClientRequestFreeLicenseResponse, _> = s.conn.job(req).await;
+                match resp {
+                    Ok(r) => purchase::classify_free_app(
+                        r.eresult() as i32,
+                        !(r.granted_appids.is_empty() && r.granted_packageids.is_empty()),
+                    ),
+                    Err(e) => Claim::Retry(net(e)),
+                }
+            }
+        }
+    }
+
+    /// Claims at most one queued license per call, within the token bucket.
     async fn claim_next(&mut self, s: &mut Session) -> Res<()> {
         while let Some(&id) = self.state.queue.front() {
-            if !s.owned.packages.contains(&id) {
+            if !s.owns(id) {
                 break;
             }
             self.state.queue.pop_front();
@@ -706,13 +752,10 @@ impl Bot {
             self.save_state();
         }
         let Some(&id) = self.state.queue.front() else { return Ok(()) };
-        if !s.licenses_known || !self.bucket.try_take(now()) {
+        if !self.bucket.try_take(now()) {
             return Ok(());
         }
-        let claim = match self.web(s).await {
-            Ok(web) => web.add_free_license(id).await,
-            Err(e) => Claim::Retry(e),
-        };
+        let claim = self.claim(s, id).await;
         match &claim {
             Claim::Ok => {
                 self.state.queue.pop_front();
@@ -723,7 +766,7 @@ impl Bot {
                 warn!("free licenses rate limited until {}", self.bucket.blocked_until());
             }
             Claim::Retry(_) => {
-                // Move it to the back so one bad package can't block the queue.
+                // Move it to the back so one bad license can't block the queue.
                 self.state.queue.pop_front();
                 self.state.queue.push_back(id);
                 s.web = None;
@@ -733,7 +776,7 @@ impl Bot {
                 self.state.rejected.insert(id);
             }
         }
-        self.log_claim(format!("sub/{id}"), claim_text(&claim));
+        self.log_claim(id.to_string(), claim_text(&claim));
         self.save_state();
         Ok(())
     }

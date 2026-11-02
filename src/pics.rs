@@ -42,6 +42,8 @@ pub struct App {
     pub parent: u32,
     /// Released (`releasestate` released/preloadonly or `state` eStateAvailable).
     pub available: bool,
+    /// `extended/isfreeapp`.
+    pub free: bool,
     pub must_own_app: u32,
     pub restricted_countries: Option<Vec<String>>,
     pub purchase_restricted_countries: Option<Vec<String>>,
@@ -126,6 +128,7 @@ impl App {
             available: release == "released"
                 || release == "preloadonly"
                 || kv.str_at(&["extended", "state"]) == Some("eStateAvailable"),
+            free: kv.bool_at(&["extended", "isfreeapp"]),
             must_own_app: u32_at(kv, &["extended", "mustownapptopurchase"]),
             restricted_countries: countries(kv.str_at(&["common", "restricted_countries"])),
             purchase_restricted_countries: countries(kv.str_at(&["extended", "purchaserestrictedcountries"])),
@@ -206,31 +209,48 @@ pub fn check_apps(p: &Package, apps: &[App], owned: &Owned, skip: Skip) -> Resul
     if p.app_ids.iter().all(|id| owned.apps.contains(id)) {
         return Err("all apps owned");
     }
-    for app in apps {
-        if app.must_own_app > 0 && !owned.apps.contains(&app.must_own_app) && !p.app_ids.contains(&app.must_own_app) {
-            return Err("app needs another app");
-        }
-        if app.restricted_countries.as_deref().is_some_and(|l| listed(l, &owned.country)) {
-            return Err("app region restricted");
-        }
-        if let Some(list) = &app.purchase_restricted_countries {
-            if listed(list, &owned.country) != app.allow_purchase_from_restricted {
-                return Err("app purchase restricted in region");
-            }
-        }
-        match app.kind.as_str() {
-            "demo" if skip.demos => return Err("demo (skipped)"),
-            "beta" if skip.playtests => return Err("playtest (skipped)"),
-            "dlc"
-                if skip.unowned_dlc
-                    && app.parent > 0
-                    && !owned.apps.contains(&app.parent)
-                    && !p.app_ids.contains(&app.parent) =>
-            {
-                return Err("DLC for a game not owned (skipped)")
-            }
-            _ => {}
+    apps.iter().try_for_each(|app| app_rules(app, owned, &p.app_ids, skip))
+}
+
+/// FreePackages' `IsRedeemableApp` (minus ownership) plus the `skip_*` options. `included`: the other
+/// apps granted together with this one, which count as owned.
+fn app_rules(app: &App, owned: &Owned, included: &[u32], skip: Skip) -> Result<(), &'static str> {
+    let has = |id: u32| owned.apps.contains(&id) || included.contains(&id);
+    if app.must_own_app > 0 && !has(app.must_own_app) {
+        return Err("app needs another app");
+    }
+    if app.restricted_countries.as_deref().is_some_and(|l| listed(l, &owned.country)) {
+        return Err("app region restricted");
+    }
+    if let Some(list) = &app.purchase_restricted_countries {
+        if listed(list, &owned.country) != app.allow_purchase_from_restricted {
+            return Err("app purchase restricted in region");
         }
     }
-    Ok(())
+    match app.kind.as_str() {
+        "demo" if skip.demos => Err("demo (skipped)"),
+        "beta" if skip.playtests => Err("playtest (skipped)"),
+        "dlc" if skip.unowned_dlc && app.parent > 0 && !has(app.parent) => Err("DLC for a game not owned (skipped)"),
+        _ => Ok(()),
+    }
+}
+
+/// Rules for claiming an app on its own (`a/<id>` via `CMsgClientRequestFreeLicense`): FreePackages'
+/// `FilterableApp.IsFree` + `IsAvailable` + `PackageFilter.IsRedeemableApp`, plus the `skip_*` options.
+pub fn check_app(app: &App, owned: &Owned, skip: Skip) -> Result<(), &'static str> {
+    // ponytail: FreePackages joins playtests through the store's ajaxrequestplaytestaccess (needs the
+    // parent's product info and a waitlist cache); dengai doesn't, so a beta app is never claimed alone.
+    if app.kind == "beta" {
+        return Err("playtest (not supported)");
+    }
+    if !app.free && app.kind != "demo" {
+        return Err("not free");
+    }
+    if !app.available {
+        return Err("not released");
+    }
+    if owned.apps.contains(&app.id) {
+        return Err("already owned");
+    }
+    app_rules(app, owned, &[], skip)
 }

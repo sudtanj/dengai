@@ -30,8 +30,10 @@ pub struct Config {
     pub farm_rescan_secs: u64,
     /// Seconds between keys / licenses in /redeem and /addlicense.
     pub redeem_delay_secs: u64,
-    /// Watch PICS and claim free packages.
+    /// Watch PICS and claim free packages (and apps, see `auto_claim_apps`).
     pub auto_claim: bool,
+    /// Also auto-claim free apps (`a/<id>`) seen in PICS, not only packages.
+    pub auto_claim_apps: bool,
     /// Seconds between PICS change polls.
     pub pics_poll_secs: u64,
     /// Max free-package claims per hour.
@@ -59,6 +61,7 @@ impl Default for Config {
             farm_rescan_secs: 6 * 3600,
             redeem_delay_secs: 5,
             auto_claim: true,
+            auto_claim_apps: true,
             pics_poll_secs: 60,
             claims_per_hour: 30,
             skip_demos: false,
@@ -146,6 +149,7 @@ impl Config {
             farm_rescan_secs,
             redeem_delay_secs,
             auto_claim,
+            auto_claim_apps,
             pics_poll_secs,
             claims_per_hour,
             skip_demos,

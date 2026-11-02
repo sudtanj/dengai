@@ -3,7 +3,7 @@
 use dengai::badges::{parse_badges, parse_drops, BadgeGame};
 use dengai::pics::{self, App, Owned, Package, Skip};
 use dengai::purchase::{self, Claim};
-use dengai::state::{State, TokenBucket};
+use dengai::state::{Id, State, TokenBucket};
 use dengai::totp;
 
 // ---- TOTP ----
@@ -229,22 +229,78 @@ fn pics_package_filter() {
     assert_eq!(pics::check_apps(&p, &[app], &owned, skip), Err("all apps owned"));
 }
 
+const APP_FREE: &[u8] = b"\"appinfo\"\n{\n\t\"appid\"\t\t\"500\"\n\t\"common\"\n\t{\n\t\t\"type\"\t\t\"Game\"\n\t\t\"releasestate\"\t\t\"released\"\n\t\t\"restricted_countries\"\t\t\"CN,RU\"\n\t}\n\t\"extended\"\n\t{\n\t\t\"isfreeapp\"\t\t\"1\"\n\t}\n}\n\0";
+
+#[test]
+fn pics_app_filter() {
+    let app = pics::parse_app_buffer(500, APP_FREE).expect("app parses");
+    assert_eq!((app.kind.as_str(), app.free, app.available), ("game", true, true));
+    assert_eq!(app.restricted_countries, Some(vec!["CN".to_string(), "RU".to_string()]));
+
+    let mut owned = Owned { country: "ID".into(), ..Owned::default() };
+    let none = Skip::default();
+    assert_eq!(pics::check_app(&app, &owned, none), Ok(()));
+    assert_eq!(pics::check_app(&app, &Owned { country: "RU".into(), ..owned.clone() }, none), Err("app region restricted"));
+    assert_eq!(pics::check_app(&App { free: false, ..app.clone() }, &owned, none), Err("not free"));
+    assert_eq!(pics::check_app(&App { available: false, ..app.clone() }, &owned, none), Err("not released"));
+    let purchase = App { purchase_restricted_countries: Some(vec!["ID".into()]), ..app.clone() };
+    assert_eq!(pics::check_app(&purchase, &owned, none), Err("app purchase restricted in region"));
+    let needs = App { must_own_app: 440, ..app.clone() };
+    assert_eq!(pics::check_app(&needs, &owned, none), Err("app needs another app"));
+
+    // Demos count as free without isfreeapp; skip_demos drops them.
+    let demo = App { kind: "demo".into(), free: false, ..app.clone() };
+    assert_eq!(pics::check_app(&demo, &owned, none), Ok(()));
+    assert_eq!(pics::check_app(&demo, &owned, Skip { demos: true, ..none }), Err("demo (skipped)"));
+    // Playtests are never claimed as apps.
+    assert_eq!(pics::check_app(&App { kind: "beta".into(), ..app.clone() }, &owned, none), Err("playtest (not supported)"));
+    // Free DLC for a game not owned, with skip_unowned_dlc.
+    let dlc = App { kind: "dlc".into(), parent: 440, ..app.clone() };
+    let skip_dlc = Skip { unowned_dlc: true, ..none };
+    assert_eq!(pics::check_app(&dlc, &owned, skip_dlc), Err("DLC for a game not owned (skipped)"));
+    assert_eq!(pics::check_app(&dlc, &owned, none), Ok(()));
+    owned.apps.insert(440);
+    assert_eq!(pics::check_app(&dlc, &owned, skip_dlc), Ok(()));
+    assert_eq!(pics::check_app(&needs, &owned, none), Ok(()));
+    owned.apps.insert(500);
+    assert_eq!(pics::check_app(&app, &owned, none), Err("already owned"));
+}
+
+#[test]
+fn license_ids() {
+    assert_eq!("sub/12".parse::<Id>(), Ok(Id::Sub(12)));
+    assert_eq!("s/12".parse::<Id>(), Ok(Id::Sub(12)));
+    assert_eq!(" A/34 ".parse::<Id>(), Ok(Id::App(34)));
+    assert_eq!("app/34".parse::<Id>(), Ok(Id::App(34)));
+    assert!("x/1".parse::<Id>().is_err() && "sub/".parse::<Id>().is_err() && "12".parse::<Id>().is_err());
+    assert_eq!((Id::Sub(7).to_string(), Id::App(7).to_string()), ("sub/7".to_string(), "a/7".to_string()));
+
+    // State files from before apps were supported hold bare sub numbers.
+    let old: State = serde_json::from_str(r#"{"change_number":9,"queue":[1,"a/2"],"done":[3],"rejected":["sub/4"]}"#).unwrap();
+    assert_eq!(old.queue, [Id::Sub(1), Id::App(2)]);
+    assert!(old.done.contains(&Id::Sub(3)) && old.rejected.contains(&Id::Sub(4)));
+    let saved = serde_json::to_string(&old).unwrap();
+    assert!(saved.contains(r#""queue":["sub/1","a/2"]"#), "{saved}");
+}
+
 // ---- state, rate limit, results ----
 
 #[test]
 fn state_and_bucket() {
     let mut s = State::default();
-    assert!(s.enqueue(5));
-    assert!(!s.enqueue(5));
-    s.rejected.insert(6);
-    assert!(!s.enqueue(6));
+    assert!(s.enqueue(Id::Sub(5)));
+    assert!(!s.enqueue(Id::Sub(5)));
+    assert!(s.enqueue(Id::App(5)), "a/5 and sub/5 are different licenses");
+    s.rejected.insert(Id::Sub(6));
+    assert!(!s.enqueue(Id::Sub(6)));
     let dir = std::env::temp_dir().join(format!("dengai-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("state.json");
     s.change_number = 42;
     s.save(&path).unwrap();
     let loaded = State::load(&path).unwrap();
-    assert_eq!((loaded.change_number, loaded.queue.len(), loaded.rejected.len()), (42, 1, 1));
+    assert_eq!((loaded.change_number, loaded.queue.len(), loaded.rejected.len()), (42, 2, 1));
+    assert_eq!(loaded.queue, [Id::Sub(5), Id::App(5)]);
     std::fs::remove_dir_all(&dir).unwrap();
 
     let mut b = TokenBucket::new(30, 1000);
@@ -268,6 +324,11 @@ fn purchase_results() {
     assert_eq!(purchase::classify_free_license(403, ""), Claim::Rejected("access denied".into()));
     assert!(matches!(purchase::classify_free_license(502, ""), Claim::Retry(_)));
     assert!(matches!(purchase::classify_free_license(200, "{\"purchaseresultdetail\":5}"), Claim::Rejected(_)));
+    assert_eq!(purchase::classify_free_app(1, true), Claim::Ok);
+    assert!(matches!(purchase::classify_free_app(1, false), Claim::Rejected(_)));
+    assert_eq!(purchase::classify_free_app(84, false), Claim::RateLimited);
+    assert!(matches!(purchase::classify_free_app(20, false), Claim::Retry(_)));
+    assert!(matches!(purchase::classify_free_app(2, false), Claim::Rejected(_)));
 }
 
 #[test]
@@ -285,5 +346,6 @@ fn config_env_overrides() {
     };
     let cfg = dengai::config::Config::load(env).unwrap();
     assert_eq!((cfg.username.as_str(), cfg.farm, cfg.claims_per_hour, cfg.auto_claim), ("bob", false, 10, true));
+    assert!(cfg.auto_claim_apps);
     assert!(dengai::config::Config::load(|k| (k == "DENGAI_FARM").then(|| "maybe".into())).is_err());
 }

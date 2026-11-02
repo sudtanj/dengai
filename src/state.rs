@@ -2,23 +2,80 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
+use std::fmt;
 use std::io::Write;
 use std::path::Path;
+
+/// A claimable license: a package (`sub/<id>`, store web endpoint) or an app (`a/<id>`,
+/// `CMsgClientRequestFreeLicense`). Stored as those strings; a bare number (older state files) is a sub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "IdRepr", into = "String")]
+pub enum Id {
+    Sub(u32),
+    App(u32),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IdRepr {
+    Num(u32),
+    Str(String),
+}
+
+impl TryFrom<IdRepr> for Id {
+    type Error = String;
+    fn try_from(r: IdRepr) -> Result<Self, String> {
+        match r {
+            IdRepr::Num(n) => Ok(Id::Sub(n)),
+            IdRepr::Str(s) => s.parse(),
+        }
+    }
+}
+
+impl std::str::FromStr for Id {
+    type Err = String;
+    /// `sub/1`, `s/1`, `a/2` or `app/2` (ASF's `!addlicense` syntax), case-insensitive.
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("invalid id {s:?}, use sub/<id> or a/<id>");
+        let (kind, n) = s.trim().split_once('/').ok_or_else(bad)?;
+        let n = n.parse().map_err(|_| bad())?;
+        match kind.to_ascii_lowercase().as_str() {
+            "sub" | "s" => Ok(Id::Sub(n)),
+            "a" | "app" => Ok(Id::App(n)),
+            _ => Err(bad()),
+        }
+    }
+}
+
+impl fmt::Display for Id {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Id::Sub(n) => write!(f, "sub/{n}"),
+            Id::App(n) => write!(f, "a/{n}"),
+        }
+    }
+}
+
+impl From<Id> for String {
+    fn from(id: Id) -> String {
+        id.to_string()
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     /// Last PICS change number processed.
     #[serde(default)]
     pub change_number: u32,
-    /// Package ids waiting to be claimed.
+    /// Licenses waiting to be claimed.
     #[serde(default)]
-    pub queue: VecDeque<u32>,
+    pub queue: VecDeque<Id>,
     /// Claimed (or found owned).
     #[serde(default)]
-    pub done: BTreeSet<u32>,
+    pub done: BTreeSet<Id>,
     /// Refused by Steam; never retried.
     #[serde(default)]
-    pub rejected: BTreeSet<u32>,
+    pub rejected: BTreeSet<Id>,
 }
 
 impl State {
@@ -40,13 +97,13 @@ impl State {
         std::fs::rename(&tmp, path)
     }
 
-    /// True when the package was already handled or queued.
-    pub fn known(&self, id: u32) -> bool {
+    /// True when the license was already handled or queued.
+    pub fn known(&self, id: Id) -> bool {
         self.done.contains(&id) || self.rejected.contains(&id) || self.queue.contains(&id)
     }
 
-    /// Queues a package unless it is already known. Returns whether it was added.
-    pub fn enqueue(&mut self, id: u32) -> bool {
+    /// Queues a license unless it is already known. Returns whether it was added.
+    pub fn enqueue(&mut self, id: Id) -> bool {
         let new = !self.known(id);
         if new {
             self.queue.push_back(id);

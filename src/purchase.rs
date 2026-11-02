@@ -70,3 +70,16 @@ pub fn classify_free_license(status: u16, body: &str) -> Claim {
         _ => Claim::Rejected("failed (HTTP 500)".into()),
     }
 }
+
+/// Classifies a `CMsgClientRequestFreeLicenseResponse` (`a/<id>`) like FreePackages' ClaimFreeApp:
+/// OK with nothing granted means the app isn't free here (or is owned), so it is not retried.
+pub fn classify_free_app(eresult: i32, granted: bool) -> Claim {
+    match (eresult, granted) {
+        (1, true) => Claim::Ok,
+        (1, false) => Claim::Rejected("nothing granted (not free here, or already owned)".into()),
+        (84, _) => Claim::RateLimited,
+        // Busy, Timeout, ServiceUnavailable, TryAnotherCM.
+        (10 | 16 | 20 | 48, _) => Claim::Retry(format!("EResult {eresult}")),
+        _ => Claim::Rejected(format!("EResult {eresult}")),
+    }
+}
