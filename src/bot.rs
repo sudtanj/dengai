@@ -441,7 +441,11 @@ impl Bot {
         loop {
             let html = self.web(s).await?.badges(page).await?;
             let (found, pages) = badges::parse_badges(&html);
-            games.extend(found.into_iter().filter(|g| !games.iter().any(|x: &BadgeGame| x.appid == g.appid)));
+            for g in found {
+                if !games.iter().any(|x: &BadgeGame| x.appid == g.appid) {
+                    games.push(g);
+                }
+            }
             if page >= pages {
                 break;
             }

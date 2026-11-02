@@ -166,10 +166,13 @@ fn pics_package_filter() {
     let skip = Skip { demos: true, playtests: true, unowned_dlc: true };
     assert_eq!(pics::precheck(&p, &owned, now), Ok(()));
     // DLC for a game not owned is skipped; owning the base game makes it claimable.
-    assert_eq!(pics::check_apps(&p, &[app.clone()], &owned, skip), Err("DLC for a game not owned (skipped)"));
+    assert_eq!(
+        pics::check_apps(&p, std::slice::from_ref(&app), &owned, skip),
+        Err("DLC for a game not owned (skipped)")
+    );
     owned.apps.insert(440);
-    assert_eq!(pics::check_apps(&p, &[app.clone()], &owned, skip), Ok(()));
-    assert_eq!(pics::check_apps(&p, &[app.clone()], &owned, Skip::default()), Ok(()));
+    assert_eq!(pics::check_apps(&p, std::slice::from_ref(&app), &owned, skip), Ok(()));
+    assert_eq!(pics::check_apps(&p, std::slice::from_ref(&app), &owned, Skip::default()), Ok(()));
     // Missing app info blocks FreeOnDemand packages.
     assert_eq!(pics::check_apps(&p, &[], &owned, skip), Err("app info missing"));
 
@@ -201,9 +204,9 @@ fn pics_package_filter() {
 
     // Demo skip and NoCost tolerance for unreleased contents.
     let demo = App { id: 441, kind: "demo".into(), available: false, ..App::default() };
-    assert_eq!(pics::check_apps(&p, &[demo.clone()], &owned, Skip::default()), Err("app not released"));
+    assert_eq!(pics::check_apps(&p, std::slice::from_ref(&demo), &owned, Skip::default()), Err("app not released"));
     let nocost = Package { billing_type: pics::BILLING_NO_COST, ..p.clone() };
-    assert_eq!(pics::check_apps(&nocost, &[demo.clone()], &owned, Skip::default()), Ok(()));
+    assert_eq!(pics::check_apps(&nocost, std::slice::from_ref(&demo), &owned, Skip::default()), Ok(()));
     assert_eq!(pics::check_apps(&nocost, &[demo], &owned, skip), Err("demo (skipped)"));
     // All contents owned.
     owned.apps.insert(441);
