@@ -49,9 +49,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-unknown-linux-musl   # Orange Pi Zero 3
-            arch: arm64
           - target: x86_64-unknown-linux-musl
-            arch: amd64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,59 +70,14 @@ jobs:
           echo "${{ matrix.target }}: $(stat -c %s target/${{ matrix.target }}/release/dengai) bytes" >> "$GITHUB_STEP_SUMMARY"
       - name: Package
         run: |
-          mkdir -p dist bin/${{ matrix.arch }}
+          mkdir -p dist
           cp target/${{ matrix.target }}/release/dengai dist/
-          cp target/${{ matrix.target }}/release/dengai bin/${{ matrix.arch }}/
           cp README.md LICENSE LICENSE-APACHE LICENSE-POLYFORM-NONCOMMERCIAL.md NOTICE dist/
           tar -C dist -czf dengai-${{ matrix.target }}.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: dengai-${{ matrix.target }}
           path: dengai-${{ matrix.target }}.tar.gz
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-${{ matrix.arch }}
-          path: bin/${{ matrix.arch }}/dengai
-
-  docker:
-    if: github.event_name == 'push'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: bin-*
-          path: artifacts
-      - name: Arrange binaries
-        run: |
-          for a in amd64 arm64; do install -D -m755 artifacts/bin-$a/dengai bin/$a/dengai; done
-          ls -l bin/*/dengai
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/dengai
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

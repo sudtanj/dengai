@@ -137,25 +137,27 @@ curl -H "$AUTH" -X POST $API/farm/resume
 
 ## Docker (Orange Pi Zero 3)
 
-Multi-arch images (`linux/arm64`, `linux/amd64`) are published to `ghcr.io/sudtanj/dengai`: a
-`scratch` image with the static musl binary, CA certificates, user 65532 and a `/data` volume.
+Multi-arch images (`linux/arm64`, `linux/amd64`) are published to Docker Hub as `sudtanj/dengai`
+by [infrastructure-tools/builder-tools/dengai](https://github.com/sudtanj/infrastructure-tools/tree/main/builder-tools/dengai)
+(distroless, user 65532, `/data` volume, compose files with a 64 MB limit there).
 
 ```sh
 docker volume create dengai
-docker run -d --name dengai --restart unless-stopped --network host \
+docker run -d --name dengai --restart unless-stopped -p 127.0.0.1:8737:8737 \
   --memory 64m \
   -e DENGAI_USERNAME=myaccount \
   -e DENGAI_PASSWORD='...' \
   -e DENGAI_SHARED_SECRET='base64secret=' \
   -e DENGAI_API_TOKEN=change-me \
   -v dengai:/data \
-  ghcr.io/sudtanj/dengai:latest
+  sudtanj/dengai:latest
 docker logs -f dengai
 ```
 
-With `--network host` the API stays on the board's `127.0.0.1:8737`. To use bridge networking
-instead, set `-e DENGAI_API_BIND=0.0.0.0:8737 -p 127.0.0.1:8737:8737`. Without a shared secret, run
-the first login with `docker run -it ...` to type the Steam Guard code, or approve it in the app.
+The image binds the API on `0.0.0.0:8737` inside the container; `-p 127.0.0.1:8737:8737` keeps it on
+the board's loopback. Don't combine the image with `--network host` unless you also set
+`-e DENGAI_API_BIND=127.0.0.1:8737`. Without a shared secret, run the first login with
+`docker run -it ...` to type the Steam Guard code, or approve it in the app.
 
 Binaries for `aarch64-unknown-linux-musl` and `x86_64-unknown-linux-musl` are attached to each
 `v*` release and to every CI run.
