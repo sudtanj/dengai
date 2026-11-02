@@ -240,7 +240,10 @@ fn pics_app_filter() {
     let mut owned = Owned { country: "ID".into(), ..Owned::default() };
     let none = Skip::default();
     assert_eq!(pics::check_app(&app, &owned, none), Ok(()));
-    assert_eq!(pics::check_app(&app, &Owned { country: "RU".into(), ..owned.clone() }, none), Err("app region restricted"));
+    assert_eq!(
+        pics::check_app(&app, &Owned { country: "RU".into(), ..owned.clone() }, none),
+        Err("app region restricted")
+    );
     assert_eq!(pics::check_app(&App { free: false, ..app.clone() }, &owned, none), Err("not free"));
     assert_eq!(pics::check_app(&App { available: false, ..app.clone() }, &owned, none), Err("not released"));
     let purchase = App { purchase_restricted_countries: Some(vec!["ID".into()]), ..app.clone() };
@@ -253,7 +256,10 @@ fn pics_app_filter() {
     assert_eq!(pics::check_app(&demo, &owned, none), Ok(()));
     assert_eq!(pics::check_app(&demo, &owned, Skip { demos: true, ..none }), Err("demo (skipped)"));
     // Playtests are never claimed as apps.
-    assert_eq!(pics::check_app(&App { kind: "beta".into(), ..app.clone() }, &owned, none), Err("playtest (not supported)"));
+    assert_eq!(
+        pics::check_app(&App { kind: "beta".into(), ..app.clone() }, &owned, none),
+        Err("playtest (not supported)")
+    );
     // Free DLC for a game not owned, with skip_unowned_dlc.
     let dlc = App { kind: "dlc".into(), parent: 440, ..app.clone() };
     let skip_dlc = Skip { unowned_dlc: true, ..none };
@@ -282,7 +288,8 @@ fn license_ids_and_backfill_list() {
     assert!(state::parse_id_list("").is_empty());
 
     // State files from before apps were supported hold bare sub numbers.
-    let old: State = serde_json::from_str(r#"{"change_number":9,"queue":[1,"a/2"],"done":[3],"rejected":["sub/4"]}"#).unwrap();
+    let old: State =
+        serde_json::from_str(r#"{"change_number":9,"queue":[1,"a/2"],"done":[3],"rejected":["sub/4"]}"#).unwrap();
     assert_eq!(old.queue, [Id::Sub(1), Id::App(2)]);
     assert!(old.done.contains(&Id::Sub(3)) && old.rejected.contains(&Id::Sub(4)) && old.backfilled_at == 0);
     let saved = serde_json::to_string(&old).unwrap();
@@ -354,6 +361,9 @@ fn config_env_overrides() {
     };
     let cfg = dengai::config::Config::load(env).unwrap();
     assert_eq!((cfg.username.as_str(), cfg.farm, cfg.claims_per_hour, cfg.auto_claim), ("bob", false, 10, true));
-    assert_eq!((cfg.backfill_url.as_str(), cfg.backfill_interval_secs, cfg.auto_claim_apps), ("https://example.com/free.txt", 0, false));
+    assert_eq!(
+        (cfg.backfill_url.as_str(), cfg.backfill_interval_secs, cfg.auto_claim_apps),
+        ("https://example.com/free.txt", 0, false)
+    );
     assert!(dengai::config::Config::load(|k| (k == "DENGAI_FARM").then(|| "maybe".into())).is_err());
 }
