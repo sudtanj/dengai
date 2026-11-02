@@ -62,6 +62,16 @@ impl From<Id> for String {
     }
 }
 
+/// A backfill list: one id per line with `#` comments and blank lines, or a JSON array of id strings.
+/// Lines that don't parse are skipped.
+pub fn parse_id_list(body: &str) -> Vec<Id> {
+    if body.trim_start().starts_with('[') {
+        let list: Vec<String> = serde_json::from_str(body).unwrap_or_default();
+        return list.iter().filter_map(|s| s.parse().ok()).collect();
+    }
+    body.lines().filter_map(|l| l.split('#').next()?.parse().ok()).collect()
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     /// Last PICS change number processed.
@@ -76,6 +86,9 @@ pub struct State {
     /// Refused by Steam; never retried.
     #[serde(default)]
     pub rejected: BTreeSet<Id>,
+    /// Unix time of the last backfill (0 = never).
+    #[serde(default)]
+    pub backfilled_at: u64,
 }
 
 impl State {

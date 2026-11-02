@@ -3,7 +3,7 @@
 use dengai::badges::{parse_badges, parse_drops, BadgeGame};
 use dengai::pics::{self, App, Owned, Package, Skip};
 use dengai::purchase::{self, Claim};
-use dengai::state::{Id, State, TokenBucket};
+use dengai::state::{self, Id, State, TokenBucket};
 use dengai::totp;
 
 // ---- TOTP ----
@@ -267,7 +267,7 @@ fn pics_app_filter() {
 }
 
 #[test]
-fn license_ids() {
+fn license_ids_and_backfill_list() {
     assert_eq!("sub/12".parse::<Id>(), Ok(Id::Sub(12)));
     assert_eq!("s/12".parse::<Id>(), Ok(Id::Sub(12)));
     assert_eq!(" A/34 ".parse::<Id>(), Ok(Id::App(34)));
@@ -275,10 +275,16 @@ fn license_ids() {
     assert!("x/1".parse::<Id>().is_err() && "sub/".parse::<Id>().is_err() && "12".parse::<Id>().is_err());
     assert_eq!((Id::Sub(7).to_string(), Id::App(7).to_string()), ("sub/7".to_string(), "a/7".to_string()));
 
+    let text = "# free stuff\nsub/1\n\n  a/2  # comment\ns/3\nnot an id\na/x\n";
+    assert_eq!(state::parse_id_list(text), [Id::Sub(1), Id::App(2), Id::Sub(3)]);
+    assert_eq!(state::parse_id_list(r#"["sub/1", "a/2", "bad"]"#), [Id::Sub(1), Id::App(2)]);
+    assert!(state::parse_id_list("[not json").is_empty());
+    assert!(state::parse_id_list("").is_empty());
+
     // State files from before apps were supported hold bare sub numbers.
     let old: State = serde_json::from_str(r#"{"change_number":9,"queue":[1,"a/2"],"done":[3],"rejected":["sub/4"]}"#).unwrap();
     assert_eq!(old.queue, [Id::Sub(1), Id::App(2)]);
-    assert!(old.done.contains(&Id::Sub(3)) && old.rejected.contains(&Id::Sub(4)));
+    assert!(old.done.contains(&Id::Sub(3)) && old.rejected.contains(&Id::Sub(4)) && old.backfilled_at == 0);
     let saved = serde_json::to_string(&old).unwrap();
     assert!(saved.contains(r#""queue":["sub/1","a/2"]"#), "{saved}");
 }
@@ -342,10 +348,12 @@ fn config_env_overrides() {
         "DENGAI_USERNAME" => Some("bob".to_string()),
         "DENGAI_FARM" => Some("off".to_string()),
         "DENGAI_CLAIMS_PER_HOUR" => Some("10".to_string()),
+        "DENGAI_BACKFILL_URL" => Some("https://example.com/free.txt".to_string()),
+        "DENGAI_AUTO_CLAIM_APPS" => Some("no".to_string()),
         _ => None,
     };
     let cfg = dengai::config::Config::load(env).unwrap();
     assert_eq!((cfg.username.as_str(), cfg.farm, cfg.claims_per_hour, cfg.auto_claim), ("bob", false, 10, true));
-    assert!(cfg.auto_claim_apps);
+    assert_eq!((cfg.backfill_url.as_str(), cfg.backfill_interval_secs, cfg.auto_claim_apps), ("https://example.com/free.txt", 0, false));
     assert!(dengai::config::Config::load(|k| (k == "DENGAI_FARM").then(|| "maybe".into())).is_err());
 }

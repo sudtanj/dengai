@@ -41,6 +41,10 @@ pub struct Config {
     pub skip_demos: bool,
     pub skip_playtests: bool,
     pub skip_unowned_dlc: bool,
+    /// URL of a list of free `sub/<id>` / `a/<id>` to check and queue (plain text or JSON array). Empty = off.
+    pub backfill_url: String,
+    /// Seconds between backfills; 0 = only once.
+    pub backfill_interval_secs: u64,
     /// Country for region rules; defaults to the one Steam reports for the login IP.
     pub country: Option<String>,
 }
@@ -67,6 +71,8 @@ impl Default for Config {
             skip_demos: false,
             skip_playtests: false,
             skip_unowned_dlc: true,
+            backfill_url: String::new(),
+            backfill_interval_secs: 0,
             country: None,
         }
     }
@@ -155,6 +161,8 @@ impl Config {
             skip_demos,
             skip_playtests,
             skip_unowned_dlc,
+            backfill_url,
+            backfill_interval_secs,
             country
         );
         if cfg.username.is_empty() {

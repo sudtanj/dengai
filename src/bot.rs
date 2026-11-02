@@ -5,7 +5,7 @@ use dengai::badges::{self, BadgeGame};
 use dengai::config::Config;
 use dengai::pics::{self, App, Owned, Package, Skip};
 use dengai::purchase::{self, Claim};
-use dengai::state::{Id, State, TokenBucket};
+use dengai::state::{self, Id, State, TokenBucket};
 use dengai::{now, totp};
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -113,6 +113,8 @@ pub struct Bot {
     bucket: TokenBucket,
     /// Steam clock offset (`server - local` s) and when it was measured.
     clock: Option<(i64, Instant)>,
+    /// Unix time before which a failed backfill fetch isn't retried.
+    backfill_retry: u64,
 }
 
 /// Per-connection state.
@@ -150,7 +152,7 @@ impl Bot {
             .map_err(|e| e.to_string())?;
         let bucket = TokenBucket::new(cfg.claims_per_hour, now());
         shared.lock().unwrap().claim_queue = state.queue.len();
-        Ok(Bot { cfg, shared, rx, http, state, state_path, bucket, clock: None })
+        Ok(Bot { cfg, shared, rx, http, state, state_path, bucket, clock: None, backfill_retry: 0 })
     }
 
     /// Steam's time for Steam Guard codes: the local clock plus the offset from `QueryTime`, re-measured
@@ -633,7 +635,37 @@ impl Bot {
             self.state.change_number = current;
             self.save_state();
         }
+        self.backfill(s).await?;
         self.claim_next(s).await
+    }
+
+    /// Fetches `backfill_url` on the first start (then every `backfill_interval_secs`) and checks its ids
+    /// exactly like PICS changes; nothing from the list is queued without passing the filter.
+    async fn backfill(&mut self, s: &mut Session) -> Res<()> {
+        let (cfg, t) = (self.cfg.clone(), now());
+        let every = cfg.backfill_interval_secs;
+        let due = self.state.backfilled_at == 0 || (every > 0 && t >= self.state.backfilled_at + every);
+        if cfg.backfill_url.is_empty() || !due || t < self.backfill_retry {
+            return Ok(());
+        }
+        let url = &cfg.backfill_url;
+        let body = match self.http.get(url.as_str()).send().await.and_then(|r| r.error_for_status()) {
+            Ok(r) => r.text().await,
+            Err(e) => Err(e),
+        };
+        let ids = match body {
+            Ok(b) => state::parse_id_list(&b),
+            Err(e) => {
+                warn!("backfill {url}: {e}; retrying in an hour");
+                self.backfill_retry = t + 3600;
+                return Ok(());
+            }
+        };
+        info!("backfill: checking {} ids from {url}", ids.len());
+        self.evaluate(s, &ids).await?;
+        self.state.backfilled_at = now();
+        self.save_state();
+        Ok(())
     }
 
     fn skip(&self) -> Skip {
