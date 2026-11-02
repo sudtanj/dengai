@@ -16,9 +16,12 @@ What it does:
 - **Key redeem** (`CMsgClientRegisterKey`) with readable results, a delay between keys, and a stop on
   rate limit.
 - **Free licenses**: claim `sub/<id>` (store web endpoint) and `a/<id>` (`CMsgClientRequestFreeLicense`)
-  on request, and **auto-claim** free packages as they appear in PICS, with the filter rules of the
+  on request, and **auto-claim** free packages and apps as they appear in PICS (plus an optional
+  backfill list on the first start), with the filter rules of the
   [FreePackages](https://github.com/Citrinate/FreePackages) ASF plugin, a token-bucket limit
   (30/hour by default) and a persistent queue.
+- **Steam time sync** for Steam Guard codes (`ITwoFactorService/QueryTime`), so a board with a
+  drifting clock still logs in.
 - A small **HTTP API** (bearer token, 127.0.0.1 by default) for status, redeeming keys, adding
   licenses and pausing farming.
 
@@ -66,7 +69,7 @@ the key name shown, or with an environment variable `DENGAI_<KEY>` (upper case),
 | --- | --- | --- |
 | `username` | (required) | Steam account name. |
 | `password` | none | Password, needed only while there is no saved refresh token. |
-| `shared_secret` | none | Base64 `shared_secret` of the mobile authenticator; generates Steam Guard codes. |
+| `shared_secret` | none | Base64 `shared_secret` of the mobile authenticator; generates Steam Guard codes (on Steam's clock, re-synced every 12 h; local clock if the sync fails). |
 | `guard_code` | none | One-off Steam Guard code (email or app) for the first login. |
 | `data_dir` | `data` (`/data` in Docker) | Holds `refresh_token`, `guard.json` and `state.json`. |
 | `log` | `info` | `error`, `warn`, `info`, `debug` or `trace`. |
@@ -76,12 +79,15 @@ the key name shown, or with an environment variable `DENGAI_<KEY>` (upper case),
 | `farm_check_secs` | `300` | Seconds between drop checks of the game being played (min 60). |
 | `farm_rescan_secs` | `21600` | Seconds between badge scans when nothing is left to farm. |
 | `redeem_delay_secs` | `5` | Seconds between keys / licenses in `/redeem` and `/addlicense`. |
-| `auto_claim` | `true` | Watch PICS and claim free packages. |
+| `auto_claim` | `true` | Watch PICS and claim free packages (and apps, see below). |
+| `auto_claim_apps` | `true` | Also auto-claim free apps (`a/<id>`), not only packages. |
 | `pics_poll_secs` | `60` | Seconds between PICS change polls (min 30). |
 | `claims_per_hour` | `30` | Token-bucket size for automatic claims. |
 | `skip_demos` | `false` | Don't auto-claim packages containing demos. |
 | `skip_playtests` | `false` | Don't auto-claim packages containing playtests. |
 | `skip_unowned_dlc` | `true` | Don't auto-claim DLC for games you don't own. |
+| `backfill_url` | empty (off) | URL of a list of free `sub/<id>` / `a/<id>` to check and queue, see [First start](#first-start-and-backfill). |
+| `backfill_interval_secs` | `0` | Seconds between backfills; `0` fetches the list only once. |
 | `country` | login IP country | Country used for region rules. |
 
 Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. Example `dengai.toml`:
@@ -102,9 +108,39 @@ deactivated demo or a playtest package, you don't own it (license list), you don
 `dontgrantifappidowned` app, you own its `mustownapptopurchase` app, the region rules
 (`restrictedcountries`, `purchaserestrictedcountries`) allow your country, and its apps are
 released (not checked for NoCost), not all owned already, not region-locked, and not skipped by
-`skip_*`. The queue, the done/rejected sets and the last PICS change number are kept in
-`data_dir/state.json` (written atomically). On the first start dengai only records the current
-change number; packages are evaluated from then on.
+`skip_*`.
+
+A changed app (`auto_claim_apps`) is queued as `a/<id>` and claimed with
+`CMsgClientRequestFreeLicense` when it is free (`extended/isfreeapp`, or `common/type` demo),
+released (`releasestate` released/preloadonly or `state` eStateAvailable), not owned, its
+`mustownapptopurchase` app is owned, `restricted_countries` / `purchaserestrictedcountries` allow
+your country, and it isn't skipped by `skip_demos` / `skip_unowned_dlc`. Playtests (type beta) are
+never claimed as apps: FreePackages joins them through the store's playtest request, which dengai
+doesn't implement. When Steam answers OK but grants nothing (usually region-locked), the app is
+marked rejected and not tried again.
+
+The queue (`sub/<id>` and `a/<id>` entries), the done/rejected sets, the last PICS change number
+and the backfill time are kept in `data_dir/state.json` (written atomically).
+
+### First start and backfill
+
+PICS only reports changes, so on the first start dengai records the current change number and
+evaluates packages and apps from then on; free licenses that already exist are never seen. To
+catch up, set `backfill_url` to a list of known free licenses. dengai fetches it once (when
+`state.json` has no `backfilled_at` yet), then every `backfill_interval_secs` if that is above 0.
+Every id from the list goes through the same PICS product-info check and filter as a PICS change,
+in batches, before it is queued, so a wrong or hostile list can't make it claim paid items; ids
+already done, rejected, queued or owned are dropped. Claims still go through the token bucket.
+
+The list is plain text, one `sub/123` (or `s/123`) or `a/456` per line, `#` comments and blank lines
+ignored, or a JSON array of the same strings. One maintained public list in this format is the
+"Steam Codes" gist used by [ASFclaim](https://github.com/C4illin/ASFclaim) (about 1900 entries,
+updated daily); or use your own list:
+
+```toml
+backfill_url = "https://gist.githubusercontent.com/C4illin/e8c5cf365d816f2640242bf01d8d3675/raw/Steam%20Codes"
+backfill_interval_secs = 86400
+```
 
 ## HTTP API
 
