@@ -356,7 +356,7 @@ impl Bot {
     /// A Steam error on one key ends the run but keeps the earlier results; the rest are skipped.
     async fn redeem(&mut self, s: &mut Session, keys: Vec<String>) -> Vec<ItemResult> {
         let mut out = Vec::new();
-        let mut skip = None;
+        let mut skip: Option<String> = None;
         for (i, key) in keys.iter().map(|k| k.trim()).enumerate() {
             if let Some(why) = &skip {
                 out.push(ItemResult { id: key.into(), ok: false, result: why.clone(), items: vec![] });
