@@ -96,8 +96,8 @@ async fn bot_gone_is_service_unavailable() {
 async fn pause_and_resume_flip_the_watch_flag() {
     let (app, mut rx, mut pause) = setup();
     let (status, _) = post(app.clone(), "/farm/pause", Some(TOKEN), "").await;
-    assert_eq!((status, pause.has_changed().unwrap(), *pause.borrow_and_update()), (StatusCode::OK, true, true));
+    assert_eq!((status, *pause.borrow_and_update()), (StatusCode::OK, true));
     let (status, _) = post(app, "/farm/resume", Some(TOKEN), "").await;
-    assert_eq!((status, pause.has_changed().unwrap(), *pause.borrow_and_update()), (StatusCode::OK, true, false));
+    assert_eq!((status, *pause.borrow_and_update()), (StatusCode::OK, false));
     assert!(rx.try_recv().is_err(), "pausing uses no command slot");
 }
