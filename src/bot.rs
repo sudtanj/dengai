@@ -1,25 +1,25 @@
 //! The Steam session: login, card farming, key redemption, free licenses and PICS auto-claim.
 
 use crate::web::Web;
+use dengai::api::{ClaimLog, Command, ItemResult, Shared, Status};
 use dengai::badges::{self, BadgeGame};
 use dengai::config::Config;
 use dengai::pics::{self, App, Owned, Package, Skip};
 use dengai::purchase::{self, Claim};
-use dengai::state::{self, Id, State, TokenBucket};
+use dengai::state::{self, Id, State, MAX_RETRIES};
 use dengai::{now, totp};
 use futures_util::StreamExt;
-use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use steam_vent::auth::{
     AuthConfirmationHandler, ConsoleAuthConfirmationHandler, DeviceConfirmationHandler, FileGuardDataStore,
     UserProvidedAuthConfirmationHandler,
 };
-use steam_vent::{Connection, ConnectionTrait, EResult, NetworkError, ServerList};
+use steam_vent::{Connection, ConnectionError, ConnectionTrait, EResult, LoginError, NetworkError, ServerList};
 use steam_vent_proto::enums_clientserver::EMsg;
 use steam_vent_proto::steammessages_auth_steamclient::CAuthentication_AccessToken_GenerateForApp_Request;
 use steam_vent_proto::steammessages_clientserver::{
@@ -35,51 +35,18 @@ use steam_vent_proto::steammessages_clientserver_appinfo::{
     CMsgClientPICSProductInfoResponse,
 };
 use steam_vent_proto::steammessages_clientserver_login::CMsgClientLoggedOff;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, sleep_until, Instant};
 use tracing::{debug, error, info, warn};
 
 const RECENT: usize = 20;
 const WEB_SESSION_TTL: Duration = Duration::from_secs(6 * 3600);
 const CLOCK_TTL: Duration = Duration::from_secs(12 * 3600);
-
-/// What the API sees.
-#[derive(Debug, Default, Clone, Serialize)]
-pub struct Status {
-    pub connected: bool,
-    pub steam_id: u64,
-    pub farming: Option<BadgeGame>,
-    pub games_to_farm: usize,
-    pub farm_paused: bool,
-    pub playing_blocked: bool,
-    pub claim_queue: usize,
-    pub change_number: u32,
-    pub recent_claims: VecDeque<ClaimLog>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ClaimLog {
-    pub id: String,
-    pub result: String,
-    pub at: u64,
-}
-
-pub type Shared = Arc<Mutex<Status>>;
-
-#[derive(Debug, Serialize)]
-pub struct ItemResult {
-    pub id: String,
-    pub ok: bool,
-    pub result: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub items: Vec<String>,
-}
-
-pub enum Command {
-    Redeem(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
-    AddLicense(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
-    Pause(bool),
-}
+const RECONNECT_MIN_SECS: u64 = 30;
+/// Backfill ids checked per PICS tick, so one huge list never holds up the loop.
+const BACKFILL_BATCH: usize = 200;
+/// Products per PICS request for apps, whose buffers are large.
+const APP_CHUNK: usize = 10;
 
 enum Exit {
     Disconnected,
@@ -107,14 +74,17 @@ pub struct Bot {
     cfg: Arc<Config>,
     shared: Shared,
     rx: mpsc::Receiver<Command>,
+    /// Set by the API; a change wakes the farm loop.
+    pause: watch::Receiver<bool>,
     http: reqwest::Client,
     state: State,
     state_path: PathBuf,
-    bucket: TokenBucket,
     /// Steam clock offset (`server - local` s) and when it was measured.
     clock: Option<(i64, Instant)>,
     /// Unix time before which a failed backfill fetch isn't retried.
     backfill_retry: u64,
+    /// Backfill ids not checked yet; lost on restart, which just fetches the list again.
+    backfill_pending: Vec<Id>,
 }
 
 /// Per-connection state.
@@ -142,17 +112,33 @@ impl Session {
 }
 
 impl Bot {
-    pub fn new(cfg: Arc<Config>, shared: Shared, rx: mpsc::Receiver<Command>) -> Res<Self> {
+    pub fn new(
+        cfg: Arc<Config>,
+        shared: Shared,
+        rx: mpsc::Receiver<Command>,
+        pause: watch::Receiver<bool>,
+    ) -> Res<Self> {
         let state_path = cfg.data_dir.join("state.json");
-        let state = State::load(&state_path)?;
+        let mut state = State::load(&state_path)?;
+        state.bucket.configure(cfg.claims_per_hour, now());
         let http = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (X11; Linux aarch64) dengai")
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;
-        let bucket = TokenBucket::new(cfg.claims_per_hour, now());
         shared.lock().unwrap().claim_queue = state.queue.len();
-        Ok(Bot { cfg, shared, rx, http, state, state_path, bucket, clock: None, backfill_retry: 0 })
+        Ok(Bot {
+            cfg,
+            shared,
+            rx,
+            pause,
+            http,
+            state,
+            state_path,
+            clock: None,
+            backfill_retry: 0,
+            backfill_pending: Vec::new(),
+        })
     }
 
     /// Steam's time for Steam Guard codes: the local clock plus the offset from `QueryTime`, re-measured
@@ -175,13 +161,10 @@ impl Bot {
     }
 
     pub async fn run(mut self) {
-        let mut backoff = 30;
+        let mut backoff = RECONNECT_MIN_SECS;
         loop {
-            let wait = match self.session().await {
-                Ok(Exit::Disconnected) => {
-                    backoff = 30;
-                    10
-                }
+            let wait = match self.session(&mut backoff).await {
+                Ok(Exit::Disconnected) => 10,
                 Ok(Exit::LoggedInElsewhere) => {
                     warn!("logged in elsewhere; reconnecting in 5 minutes");
                     300
@@ -223,6 +206,13 @@ impl Bot {
         });
     }
 
+    /// Blocks automatic and manual claims after Steam rate limited them, for longer on each repeat.
+    fn back_off(&mut self) {
+        self.state.bucket.back_off(now());
+        warn!("free licenses rate limited until {}", self.state.bucket.blocked_until());
+        self.save_state();
+    }
+
     async fn connect(&mut self) -> Res<Connection> {
         let cfg = self.cfg.clone();
         if cfg.shared_secret.is_some() {
@@ -233,7 +223,11 @@ impl Bot {
         if let Ok(token) = std::fs::read_to_string(&token_path) {
             match Connection::access(&servers, &cfg.username, token.trim()).await {
                 Ok(c) => return Ok(c),
-                Err(e) => warn!("saved refresh token rejected ({e}), logging in with the password"),
+                Err(
+                    e @ (ConnectionError::AccessToken(_)
+                    | ConnectionError::LoginError(LoginError::InvalidCredentials | LoginError::Unknown(_))),
+                ) => warn!("saved refresh token rejected ({e}), logging in with the password"),
+                Err(e) => return Err(format!("connecting with the saved refresh token: {e}")),
             }
         }
         let password = cfg.password.as_deref().ok_or("no saved refresh token and no password configured")?;
@@ -267,7 +261,7 @@ impl Bot {
         Ok(conn)
     }
 
-    async fn session(&mut self) -> Res<Exit> {
+    async fn session(&mut self, backoff: &mut u64) -> Res<Exit> {
         let mut conn = self.connect().await?;
         conn.set_timeout(Duration::from_secs(30));
         // Subscribe before yielding so the post-logon license list isn't missed.
@@ -277,6 +271,7 @@ impl Bot {
         let steam_id = u64::from(conn.steam_id());
         let country = self.cfg.country.clone().or_else(|| conn.ip_country_code()).unwrap_or_default();
         info!("logged in as {steam_id} (country {country})");
+        *backoff = RECONNECT_MIN_SECS;
         let mut s = Session {
             refresh_token: conn.access_token().unwrap_or_default().to_string(),
             conn,
@@ -308,12 +303,17 @@ impl Bot {
         let mut pics_tick = tokio::time::interval(Duration::from_secs(self.cfg.pics_poll_secs));
         loop {
             tokio::select! {
-                Some(cmd) = self.rx.recv() => self.command(&mut s, cmd).await?,
+                Some(cmd) = self.rx.recv() => self.command(&mut s, cmd).await,
+                Ok(()) = self.pause.changed() => {
+                    info!("farming {}", if *self.pause.borrow_and_update() { "paused" } else { "resumed" });
+                    s.farm_next = Instant::now();
+                }
                 Some(Ok(l)) = licenses.next() => self.on_licenses(&mut s, l).await?,
                 Some(Ok(p)) = playing.next() => self.on_playing_state(&mut s, p),
                 Some(Ok(o)) = logged_off.next() => {
                     warn!("logged off by Steam: {}", eresult(o.eresult()));
-                    return Ok(if o.eresult() == 6 { Exit::LoggedInElsewhere } else { Exit::Disconnected });
+                    // 6 LoggedInElsewhere, 34 LogonSessionReplaced.
+                    return Ok(if matches!(o.eresult(), 6 | 34) { Exit::LoggedInElsewhere } else { Exit::Disconnected });
                 }
                 _ = sleep_until(s.farm_next), if self.cfg.farm => self.farm(&mut s).await?,
                 _ = pics_tick.tick() => self.pics(&mut s).await?,
@@ -340,46 +340,46 @@ impl Bot {
 
     // ---- commands ----
 
-    async fn command(&mut self, s: &mut Session, cmd: Command) -> Res<()> {
+    async fn command(&mut self, s: &mut Session, cmd: Command) {
         match cmd {
-            Command::Pause(paused) => {
-                info!("farming {}", if paused { "paused" } else { "resumed" });
-                self.status(|st| st.farm_paused = paused);
-                s.farm_next = Instant::now();
-            }
             Command::Redeem(keys, reply) => {
-                let r = self.redeem(s, keys).await?;
+                let r = self.redeem(s, keys).await;
                 let _ = reply.send(r);
             }
             Command::AddLicense(ids, reply) => {
-                let r = self.add_licenses(s, ids).await?;
+                let r = self.add_licenses(s, ids).await;
                 let _ = reply.send(r);
             }
         }
-        Ok(())
     }
 
-    async fn redeem(&mut self, s: &mut Session, keys: Vec<String>) -> Res<Vec<ItemResult>> {
+    /// A Steam error on one key ends the run but keeps the earlier results; the rest are skipped.
+    async fn redeem(&mut self, s: &mut Session, keys: Vec<String>) -> Vec<ItemResult> {
         let mut out = Vec::new();
-        let mut limited = false;
+        let mut skip = None;
         for (i, key) in keys.iter().map(|k| k.trim()).enumerate() {
-            if limited {
-                out.push(ItemResult {
-                    id: key.into(),
-                    ok: false,
-                    result: "skipped (rate limited)".into(),
-                    items: vec![],
-                });
+            if let Some(why) = &skip {
+                out.push(ItemResult { id: key.into(), ok: false, result: why.clone(), items: vec![] });
                 continue;
             }
             if i > 0 {
                 sleep(Duration::from_secs(self.cfg.redeem_delay_secs)).await;
             }
             let req = CMsgClientRegisterKey { key: Some(key.into()), ..Default::default() };
-            let resp: CMsgClientPurchaseResponse = s.conn.job(req).await.map_err(net)?;
+            let resp: Result<CMsgClientPurchaseResponse, _> = s.conn.job(req).await;
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    out.push(ItemResult { id: key.into(), ok: false, result: net(e), items: vec![] });
+                    skip = Some("skipped (steam error)".to_string());
+                    continue;
+                }
+            };
             let detail = resp.purchase_result_details();
             let ok = resp.eresult() == 1;
-            limited = detail == purchase::DETAIL_RATE_LIMITED;
+            if detail == purchase::DETAIL_RATE_LIMITED {
+                skip = Some("skipped (rate limited)".to_string());
+            }
             let result = if ok {
                 "ok".to_string()
             } else {
@@ -389,10 +389,11 @@ impl Bot {
             info!("key {}: {result} {items:?}", mask(key));
             out.push(ItemResult { id: key.into(), ok, result, items });
         }
-        Ok(out)
+        out
     }
 
-    async fn add_licenses(&mut self, s: &mut Session, ids: Vec<String>) -> Res<Vec<ItemResult>> {
+    /// Claims through the shared token bucket. A rate limit ends the run, the rest are skipped.
+    async fn add_licenses(&mut self, s: &mut Session, ids: Vec<String>) -> Vec<ItemResult> {
         let mut out = Vec::new();
         let mut limited = false;
         for (i, raw) in ids.iter().enumerate() {
@@ -403,21 +404,32 @@ impl Bot {
                     if i > 0 {
                         sleep(Duration::from_secs(self.cfg.redeem_delay_secs)).await;
                     }
-                    let claim = self.claim(s, lic).await;
-                    limited = claim == Claim::RateLimited;
-                    if claim == Claim::Ok {
-                        self.state.done.insert(lic);
-                        self.state.queue.retain(|q| *q != lic);
-                        self.save_state();
+                    if self.state.bucket.try_take(now()) {
+                        let claim = self.claim(s, lic).await;
+                        match claim {
+                            Claim::Ok => {
+                                self.state.bucket.reset_backoff();
+                                self.state.queue.retain(|q| *q != lic);
+                                self.state.done.insert(lic);
+                                self.save_state();
+                            }
+                            Claim::RateLimited => {
+                                limited = true;
+                                self.back_off();
+                            }
+                            _ => {}
+                        }
+                        (claim == Claim::Ok, claim_text(&claim))
+                    } else {
+                        (false, "claim limit reached, try again later".to_string())
                     }
-                    (claim == Claim::Ok, claim_text(&claim))
                 }
                 Err(e) => (false, e),
             };
             self.log_claim(id.to_string(), result.clone());
             out.push(ItemResult { id: id.into(), ok, result, items: vec![] });
         }
-        Ok(out)
+        out
     }
 
     // ---- farming ----
@@ -640,31 +652,41 @@ impl Bot {
     }
 
     /// Fetches `backfill_url` on the first start (then every `backfill_interval_secs`) and checks its ids
-    /// exactly like PICS changes; nothing from the list is queued without passing the filter.
+    /// exactly like PICS changes, `BACKFILL_BATCH` per call; nothing from the list is queued without
+    /// passing the filter.
     async fn backfill(&mut self, s: &mut Session) -> Res<()> {
-        let (cfg, t) = (self.cfg.clone(), now());
-        let every = cfg.backfill_interval_secs;
-        let due = self.state.backfilled_at == 0 || (every > 0 && t >= self.state.backfilled_at + every);
-        if cfg.backfill_url.is_empty() || !due || t < self.backfill_retry {
-            return Ok(());
-        }
-        let url = &cfg.backfill_url;
-        let body = match self.http.get(url.as_str()).send().await.and_then(|r| r.error_for_status()) {
-            Ok(r) => r.text().await,
-            Err(e) => Err(e),
-        };
-        let ids = match body {
-            Ok(b) => state::parse_id_list(&b),
-            Err(e) => {
-                warn!("backfill {url}: {e}; retrying in an hour");
-                self.backfill_retry = t + 3600;
+        if self.backfill_pending.is_empty() {
+            let (cfg, t) = (self.cfg.clone(), now());
+            let every = cfg.backfill_interval_secs;
+            let due = self.state.backfilled_at == 0 || (every > 0 && t >= self.state.backfilled_at + every);
+            if cfg.backfill_url.is_empty() || !due || t < self.backfill_retry {
                 return Ok(());
             }
-        };
-        info!("backfill: checking {} ids from {url}", ids.len());
-        self.evaluate(s, &ids).await?;
-        self.state.backfilled_at = now();
-        self.save_state();
+            // reqwest errors embed the full URL, which may carry a secret in its path or query.
+            let host = reqwest::Url::parse(&cfg.backfill_url).ok().and_then(|u| u.host_str().map(str::to_owned));
+            let host = host.as_deref().unwrap_or("?");
+            let body = match self.http.get(cfg.backfill_url.as_str()).send().await.and_then(|r| r.error_for_status()) {
+                Ok(r) => r.text().await,
+                Err(e) => Err(e),
+            };
+            self.backfill_pending = match body {
+                Ok(b) => state::parse_id_list(&b),
+                Err(e) => {
+                    warn!("backfill {host}: {}; retrying in an hour", e.without_url());
+                    self.backfill_retry = t + 3600;
+                    return Ok(());
+                }
+            };
+            info!("backfill: checking {} ids from {host}", self.backfill_pending.len());
+        }
+        let n = BACKFILL_BATCH.min(self.backfill_pending.len());
+        let batch = self.backfill_pending[..n].to_vec();
+        self.evaluate(s, &batch).await?;
+        self.backfill_pending.drain(..n);
+        if self.backfill_pending.is_empty() {
+            self.state.backfilled_at = now();
+            self.save_state();
+        }
         Ok(())
     }
 
@@ -712,7 +734,7 @@ impl Bot {
             added += self.evaluate_subs(s, chunk).await?;
         }
         let skip = self.skip();
-        for chunk in apps.chunks(50) {
+        for chunk in apps.chunks(APP_CHUNK) {
             for app in self.product_info(s, &[], chunk).await?.1.values() {
                 added += self.verdict(Id::App(app.id), pics::check_app(app, &s.owned, skip));
             }
@@ -740,7 +762,7 @@ impl Bot {
         app_ids.sort_unstable();
         app_ids.dedup();
         let mut apps = HashMap::new();
-        for chunk in app_ids.chunks(50) {
+        for chunk in app_ids.chunks(APP_CHUNK) {
             apps.extend(self.product_info(s, &[], chunk).await?.1);
         }
         let skip = self.skip();
@@ -784,29 +806,18 @@ impl Bot {
             self.save_state();
         }
         let Some(&id) = self.state.queue.front() else { return Ok(()) };
-        if !self.bucket.try_take(now()) {
+        if !self.state.bucket.try_take(now()) {
             return Ok(());
         }
         let claim = self.claim(s, id).await;
         match &claim {
-            Claim::Ok => {
-                self.state.queue.pop_front();
-                self.state.done.insert(id);
-            }
-            Claim::RateLimited => {
-                self.bucket.back_off(now(), 3600);
-                warn!("free licenses rate limited until {}", self.bucket.blocked_until());
-            }
-            Claim::Retry(_) => {
-                // Move it to the back so one bad license can't block the queue.
-                self.state.queue.pop_front();
-                self.state.queue.push_back(id);
-                s.web = None;
-            }
-            Claim::Rejected(_) => {
-                self.state.queue.pop_front();
-                self.state.rejected.insert(id);
-            }
+            Claim::Ok => self.state.bucket.reset_backoff(),
+            Claim::RateLimited => self.back_off(),
+            Claim::Retry(_) => s.web = None,
+            Claim::Rejected(_) => {}
+        }
+        if self.state.settle(id, &claim) {
+            warn!("{id}: giving up after {MAX_RETRIES} failures");
         }
         self.log_claim(id.to_string(), claim_text(&claim));
         self.save_state();
@@ -817,7 +828,7 @@ impl Bot {
 fn claim_text(c: &Claim) -> String {
     match c {
         Claim::Ok => "ok".into(),
-        Claim::RateLimited => "rate limited, try again in an hour".into(),
+        Claim::RateLimited => "rate limited, backing off".into(),
         Claim::Retry(e) => format!("will retry: {e}"),
         Claim::Rejected(e) => format!("rejected: {e}"),
     }

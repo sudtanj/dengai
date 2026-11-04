@@ -1,7 +1,8 @@
 //! The persistent auto-claim state (one small JSON file, written atomically) and the claim rate limiter.
 
+use crate::purchase::Claim;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
@@ -89,7 +90,16 @@ pub struct State {
     /// Unix time of the last backfill (0 = never).
     #[serde(default)]
     pub backfilled_at: u64,
+    /// Failed attempts per queued license (keyed by its `sub/<id>` / `a/<id>` string).
+    #[serde(default)]
+    pub retries: BTreeMap<String, u8>,
+    /// The claim rate limiter, so a restart doesn't forget a back-off.
+    #[serde(default)]
+    pub bucket: TokenBucket,
 }
+
+/// Failed attempts after which a license is rejected.
+pub const MAX_RETRIES: u8 = 5;
 
 impl State {
     /// Loads the state, or an empty one when the file doesn't exist.
@@ -123,21 +133,73 @@ impl State {
         }
         new
     }
+
+    /// Applies the outcome of claiming `id` (the queue front): done, rejected, or back of the queue
+    /// until `MAX_RETRIES` failures. Returns true when a retry limit moved it to `rejected`.
+    pub fn settle(&mut self, id: Id, claim: &Claim) -> bool {
+        let key = id.to_string();
+        match claim {
+            Claim::RateLimited => return false,
+            Claim::Ok => {
+                self.done.insert(id);
+            }
+            Claim::Rejected(_) => {
+                self.rejected.insert(id);
+            }
+            Claim::Retry(_) => {
+                let failures = self.retries.get(&key).copied().unwrap_or(0) + 1;
+                if failures < MAX_RETRIES {
+                    self.retries.insert(key, failures);
+                    self.queue.retain(|q| *q != id);
+                    self.queue.push_back(id);
+                    return false;
+                }
+                self.rejected.insert(id);
+            }
+        }
+        self.queue.retain(|q| *q != id);
+        self.retries.remove(&key);
+        matches!(claim, Claim::Retry(_))
+    }
 }
 
-/// Token bucket: `per_hour` claims, refilled continuously, with a hard back-off window.
-#[derive(Debug, Clone)]
+/// Token bucket: `per_hour` claims, refilled continuously, with a hard back-off window that doubles
+/// on each rate limit until a claim succeeds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenBucket {
+    /// Set from the config by `configure`.
+    #[serde(skip)]
     capacity: f64,
+    #[serde(default)]
     tokens: f64,
+    #[serde(default)]
     last: u64,
+    #[serde(default)]
     blocked_until: u64,
+    /// Consecutive rate limits.
+    #[serde(default)]
+    strikes: u32,
 }
+
+/// The first back-off; it doubles per strike up to `BACKOFF_DOUBLINGS` times (1 h, 2 h, 4 h, 8 h).
+const BACKOFF_BASE_SECS: u64 = 3600;
+const BACKOFF_DOUBLINGS: u32 = 3;
 
 impl TokenBucket {
     pub fn new(per_hour: u32, now: u64) -> Self {
-        let capacity = per_hour.max(1) as f64;
-        TokenBucket { capacity, tokens: capacity, last: now, blocked_until: 0 }
+        let mut bucket = TokenBucket::default();
+        bucket.configure(per_hour, now);
+        bucket
+    }
+
+    /// Sets the size from the config. A bucket that was never used starts full.
+    pub fn configure(&mut self, per_hour: u32, now: u64) {
+        self.capacity = per_hour.max(1) as f64;
+        if self.last == 0 {
+            self.tokens = self.capacity;
+            self.last = now;
+        }
+        self.tokens = self.tokens.min(self.capacity);
     }
 
     /// Takes one token if available.
@@ -156,11 +218,18 @@ impl TokenBucket {
         }
     }
 
-    /// Empties the bucket and blocks it for `secs`.
-    pub fn back_off(&mut self, now: u64, secs: u64) {
+    /// Empties the bucket and blocks it for 1 h, doubling on each consecutive call up to 8 h.
+    pub fn back_off(&mut self, now: u64) {
+        let secs = BACKOFF_BASE_SECS << self.strikes.min(BACKOFF_DOUBLINGS);
+        self.strikes += 1;
         self.tokens = 0.0;
         self.last = now + secs;
         self.blocked_until = now + secs;
+    }
+
+    /// Forgets earlier rate limits after a successful claim.
+    pub fn reset_backoff(&mut self) {
+        self.strikes = 0;
     }
 
     /// Unix time until which the bucket is blocked (0 when not blocked).

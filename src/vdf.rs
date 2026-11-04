@@ -60,10 +60,13 @@ impl Kv {
     }
 }
 
+/// Nesting deeper than this is rejected, so hostile input can't overflow the stack.
+const MAX_DEPTH: usize = 32;
+
 /// Parses text KeyValues. The result is a map of the top-level pairs.
 pub fn parse_text(s: &str) -> Option<Kv> {
     let mut p = Text { b: s.as_bytes(), i: 0 };
-    p.map(false).map(Kv::Map)
+    p.map(0).map(Kv::Map)
 }
 
 enum Tok {
@@ -126,7 +129,8 @@ impl Text<'_> {
         }
     }
 
-    fn map(&mut self, nested: bool) -> Option<Vec<(String, Kv)>> {
+    fn map(&mut self, depth: usize) -> Option<Vec<(String, Kv)>> {
+        let nested = depth > 0;
         let mut out = Vec::new();
         loop {
             match self.next() {
@@ -136,7 +140,8 @@ impl Text<'_> {
                 Some(Tok::Str(key)) => {
                     let value = match self.next()? {
                         Tok::Str(s) => Kv::Str(s),
-                        Tok::Open => Kv::Map(self.map(true)?),
+                        Tok::Open if depth >= MAX_DEPTH => return None,
+                        Tok::Open => Kv::Map(self.map(depth + 1)?),
                         Tok::Close => return None,
                     };
                     out.push((key, value));
@@ -149,7 +154,7 @@ impl Text<'_> {
 /// Parses binary KeyValues. The result is a map of the top-level pairs.
 pub fn parse_binary(b: &[u8]) -> Option<Kv> {
     let mut i = 0;
-    bin_map(b, &mut i, true).map(Kv::Map)
+    bin_map(b, &mut i, 0).map(Kv::Map)
 }
 
 fn take<'a>(b: &'a [u8], i: &mut usize, n: usize) -> Option<&'a [u8]> {
@@ -165,17 +170,18 @@ fn cstr(b: &[u8], i: &mut usize) -> Option<String> {
     Some(s)
 }
 
-fn bin_map(b: &[u8], i: &mut usize, top: bool) -> Option<Vec<(String, Kv)>> {
+fn bin_map(b: &[u8], i: &mut usize, depth: usize) -> Option<Vec<(String, Kv)>> {
     let mut out = Vec::new();
     loop {
-        let Some(&t) = b.get(*i) else { return top.then_some(out) };
+        let Some(&t) = b.get(*i) else { return (depth == 0).then_some(out) };
         *i += 1;
         if t == 8 || t == 11 {
             return Some(out);
         }
         let name = cstr(b, i)?;
         let value = match t {
-            0 => Kv::Map(bin_map(b, i, false)?),
+            0 if depth >= MAX_DEPTH => return None,
+            0 => Kv::Map(bin_map(b, i, depth + 1)?),
             1 => Kv::Str(cstr(b, i)?),
             2 | 4 | 6 => Kv::Int(i32::from_le_bytes(take(b, i, 4)?.try_into().ok()?) as i64),
             3 => Kv::Str(f32::from_le_bytes(take(b, i, 4)?.try_into().ok()?).to_string()),

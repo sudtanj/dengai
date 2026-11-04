@@ -450,6 +450,7 @@ dependencies = [
  "steam-vent-proto",
  "tokio",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

@@ -50,7 +50,9 @@ pub fn classify_free_license(status: u16, body: &str) -> Claim {
         200 | 500 => {}
         403 => return Claim::Rejected("access denied".into()),
         401 => return Claim::Retry("web session not logged in".into()),
-        502..=504 | 404 | 429 => return Claim::Retry(format!("steam store unavailable (HTTP {status})")),
+        404 => return Claim::Rejected("not found (HTTP 404)".into()),
+        429 => return Claim::RateLimited,
+        502..=504 => return Claim::Retry(format!("steam store unavailable (HTTP {status})")),
         _ => return Claim::Retry(format!("unexpected HTTP {status}")),
     }
     let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
@@ -67,7 +69,7 @@ pub fn classify_free_license(status: u16, body: &str) -> Claim {
         Some(e) if e.contains("rate limited") => Claim::RateLimited,
         Some(e) if !e.is_empty() => Claim::Rejected(e.to_string()),
         _ if status == 200 => Claim::Ok,
-        _ => Claim::Rejected("failed (HTTP 500)".into()),
+        _ => Claim::Retry("HTTP 500 without a result".into()),
     }
 }
 
@@ -77,7 +79,8 @@ pub fn classify_free_app(eresult: i32, granted: bool) -> Claim {
     match (eresult, granted) {
         (1, true) => Claim::Ok,
         (1, false) => Claim::Rejected("nothing granted (not free here, or already owned)".into()),
-        (84, _) => Claim::RateLimited,
+        // LimitExceeded, RateLimitExceeded.
+        (25 | 84, _) => Claim::RateLimited,
         // Busy, Timeout, ServiceUnavailable, TryAnotherCM.
         (10 | 16 | 20 | 48, _) => Claim::Retry(format!("EResult {eresult}")),
         _ => Claim::Rejected(format!("EResult {eresult}")),

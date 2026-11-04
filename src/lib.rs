@@ -1,5 +1,6 @@
 //! Network-free logic of dengai, kept in the library so it can be tested without Steam.
 
+pub mod api;
 pub mod badges;
 pub mod config;
 pub mod pics;

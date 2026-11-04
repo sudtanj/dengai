@@ -3,8 +3,8 @@
 use dengai::badges::{parse_badges, parse_drops, BadgeGame};
 use dengai::pics::{self, App, Owned, Package, Skip};
 use dengai::purchase::{self, Claim};
-use dengai::state::{self, Id, State, TokenBucket};
-use dengai::totp;
+use dengai::state::{self, Id, State, TokenBucket, MAX_RETRIES};
+use dengai::{totp, vdf};
 
 // ---- TOTP ----
 
@@ -320,7 +320,7 @@ fn state_and_bucket() {
     assert_eq!((0..40).filter(|_| b.try_take(1000)).count(), 30);
     assert!(b.try_take(1000 + 120)); // 30/h refills one token per 120 s
     assert!(!b.try_take(1000 + 120));
-    b.back_off(2000, 3600);
+    b.back_off(2000);
     assert!(!b.try_take(2000 + 3599));
     assert!(b.try_take(2000 + 3600 + 120));
 }
@@ -366,4 +366,92 @@ fn config_env_overrides() {
         ("https://example.com/free.txt", 0, false)
     );
     assert!(dengai::config::Config::load(|k| (k == "DENGAI_FARM").then(|| "maybe".into())).is_err());
+}
+
+#[test]
+fn free_license_http_classification() {
+    let classify = purchase::classify_free_license;
+    assert!(matches!(classify(500, ""), Claim::Retry(_)), "500 without JSON is transient");
+    assert!(matches!(classify(500, "{\"success\":false}"), Claim::Retry(_)));
+    assert!(matches!(classify(500, "{\"purchaseresultdetail\":5}"), Claim::Rejected(_)));
+    assert!(matches!(classify(500, "{\"error\":\"nope\"}"), Claim::Rejected(_)));
+    assert!(matches!(classify(404, ""), Claim::Rejected(_)));
+    assert_eq!(classify(429, ""), Claim::RateLimited);
+    assert!(matches!(classify(503, ""), Claim::Retry(_)));
+    assert_eq!(purchase::classify_free_app(25, false), Claim::RateLimited);
+}
+
+#[test]
+fn retries_are_capped_and_old_state_loads() {
+    let mut s = State::default();
+    let id = Id::Sub(1);
+    s.enqueue(id);
+    s.enqueue(Id::Sub(2));
+    let retry = Claim::Retry("busy".into());
+    for n in 1..MAX_RETRIES {
+        assert!(!s.settle(id, &retry));
+        assert_eq!(s.retries["sub/1"], n);
+        assert_eq!(s.queue.back(), Some(&id), "a failing license goes behind the others");
+    }
+    assert!(s.settle(id, &retry), "failure {MAX_RETRIES} gives up");
+    assert!(s.rejected.contains(&id) && !s.queue.contains(&id) && s.retries.is_empty());
+
+    s.settle(Id::Sub(2), &retry);
+    s.settle(Id::Sub(2), &Claim::Ok);
+    assert!(s.done.contains(&Id::Sub(2)) && s.retries.is_empty(), "a success clears the counter");
+    s.settle(Id::Sub(3), &Claim::RateLimited);
+    assert!(s.retries.is_empty() && !s.rejected.contains(&Id::Sub(3)), "a rate limit isn't a failure");
+
+    let old: State = serde_json::from_str(r#"{"change_number":7,"queue":["sub/1"]}"#).unwrap();
+    assert_eq!((old.change_number, old.queue.len(), old.retries.len()), (7, 1, 0));
+    let mut bucket = old.bucket;
+    bucket.configure(3, 100);
+    assert_eq!((0..5).filter(|_| bucket.try_take(100)).count(), 3, "no saved bucket starts full");
+}
+
+#[test]
+fn bucket_backoff_grows_persists_and_resets() {
+    let mut b = TokenBucket::new(30, 1000);
+    let mut waits = Vec::new();
+    for _ in 0..5 {
+        b.back_off(1000);
+        waits.push(b.blocked_until() - 1000);
+    }
+    assert_eq!(waits, [3600, 7200, 14400, 28800, 28800]);
+    b.reset_backoff();
+    b.back_off(1000);
+    assert_eq!(b.blocked_until(), 1000 + 3600);
+
+    b.back_off(2000);
+    let mut loaded: TokenBucket = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+    loaded.configure(30, 3000);
+    assert_eq!(loaded.blocked_until(), 2000 + 7200);
+    assert!(!loaded.try_take(2000 + 7199));
+    loaded.back_off(5000);
+    assert_eq!(loaded.blocked_until(), 5000 + 14400, "the strike count survives a restart");
+}
+
+#[test]
+fn vdf_depth_is_capped() {
+    let text = |levels: usize| "\"k\" {\n".repeat(levels) + &"}\n".repeat(levels);
+    assert!(vdf::parse_text(&text(32)).is_some());
+    assert!(vdf::parse_text(&text(33)).is_none());
+    let binary = |levels: usize| [[0u8, b'k', 0].repeat(levels), vec![8; levels]].concat();
+    assert!(vdf::parse_binary(&binary(32)).is_some());
+    assert!(vdf::parse_binary(&binary(33)).is_none());
+}
+
+#[test]
+fn api_token_length_is_checked() {
+    let load = |token: &str| {
+        let token = token.to_string();
+        dengai::config::Config::load(move |k| match k {
+            "DENGAI_USERNAME" => Some("bob".to_string()),
+            "DENGAI_API_TOKEN" => Some(token.clone()),
+            _ => None,
+        })
+    };
+    assert!(load("").is_ok(), "an empty token disables the API");
+    assert!(load("0123456789abcdef").is_ok());
+    assert!(load("0123456789abcde").unwrap_err().contains("at least 16"));
 }

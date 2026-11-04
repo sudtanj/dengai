@@ -1,9 +1,9 @@
 //! dengai: a tiny single-account Steam idler (card farming, key redeem, free licenses).
 
-mod api;
 mod bot;
 mod web;
 
+use dengai::api::{self, Shared, Status};
 use dengai::config::Config;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -47,9 +47,10 @@ async fn run(cfg: Config) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cfg = Arc::new(cfg);
-    let shared = bot::Shared::new(Mutex::new(bot::Status::default()));
+    let shared = Shared::new(Mutex::new(Status::default()));
     let (tx, rx) = tokio::sync::mpsc::channel(8);
-    let bot = match bot::Bot::new(cfg.clone(), shared.clone(), rx) {
+    let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+    let bot = match bot::Bot::new(cfg.clone(), shared.clone(), rx, pause_rx) {
         Ok(b) => b,
         Err(e) => {
             error!("{e}");
@@ -61,7 +62,7 @@ async fn run(cfg: Config) -> ExitCode {
     } else {
         let (bind, token) = (cfg.api_bind.clone(), cfg.api_token.clone());
         tokio::spawn(async move {
-            if let Err(e) = api::serve(bind, token, shared, tx).await {
+            if let Err(e) = api::serve(bind, token, shared, tx, pause_tx).await {
                 error!("API: {e}");
             }
         });

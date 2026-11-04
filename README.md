@@ -40,8 +40,10 @@ feature set (many bots, trading, plugins, IPC GUI), use ASF. The Steam network l
   the official client does too, but automation is at your own risk; Valve may change or limit any
   of it.
 - Steam rate-limits key activations (roughly 10 failed keys per hour) and free licenses (about 50
-  per hour). dengai stops a `/redeem` batch on `RateLimited`, waits an hour on the free-license
-  limit, and claims at most `claims_per_hour` packages per hour.
+  per hour). dengai stops a `/redeem` batch on `RateLimited`, and on a free-license limit waits an hour,
+  then 2, 4 and 8 hours on each repeat until a claim succeeds (kept across restarts). It claims at most
+  `claims_per_hour` licenses per hour, `/addlicense` included, and rejects a queued license after 5
+  failed attempts.
 - Farming plays a game on your account: while dengai farms, friends see you "in game". When you
   start a game on another device, Steam blocks playing on dengai's session and farming pauses.
 - Keep the data dir private: `refresh_token` is a long-lived login for your account.
@@ -74,7 +76,7 @@ the key name shown, or with an environment variable `DENGAI_<KEY>` (upper case),
 | `data_dir` | `data` (`/data` in Docker) | Holds `refresh_token`, `guard.json` and `state.json`. |
 | `log` | `info` | `error`, `warn`, `info`, `debug` or `trace`. |
 | `api_bind` | `127.0.0.1:8737` | API listen address. |
-| `api_token` | empty | Bearer token for the API. The API is off when empty. |
+| `api_token` | empty | Bearer token for the API, at least 16 characters (startup fails on a shorter one). The API is off when empty. |
 | `farm` | `true` | Farm card drops. |
 | `farm_check_secs` | `300` | Seconds between drop checks of the game being played (min 60). |
 | `farm_rescan_secs` | `21600` | Seconds between badge scans when nothing is left to farm. |
@@ -95,7 +97,7 @@ Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. Example `dengai.toml`:
 ```toml
 username = "myaccount"
 shared_secret = "base64secret="
-api_token = "change-me"
+api_token = "change-me-to-a-long-random-token"
 skip_demos = true
 claims_per_hour = 20
 ```
@@ -144,7 +146,9 @@ backfill_interval_secs = 86400
 
 ## HTTP API
 
-All endpoints need `Authorization: Bearer $DENGAI_API_TOKEN`.
+All endpoints need `Authorization: Bearer $DENGAI_API_TOKEN`. `/redeem` and `/addlicense` take 1 to 50
+items per request and answer 503 if Steam hasn't finished within 120 s (the batch keeps running; see
+`/status`).
 
 ```sh
 API=http://127.0.0.1:8737; AUTH="Authorization: Bearer $DENGAI_API_TOKEN"
@@ -184,7 +188,7 @@ docker run -d --name dengai --restart unless-stopped -p 127.0.0.1:8737:8737 \
   -e DENGAI_USERNAME=myaccount \
   -e DENGAI_PASSWORD='...' \
   -e DENGAI_SHARED_SECRET='base64secret=' \
-  -e DENGAI_API_TOKEN=change-me \
+  -e DENGAI_API_TOKEN=change-me-to-a-long-random-token \
   -v dengai:/data \
   sudtanj/dengai:latest
 docker logs -f dengai
