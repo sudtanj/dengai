@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>dengai sign-in</title>
+<style>
+  :root { color-scheme: light dark; --ink: #1b1f23; --ground: #fafaf8; --muted: #4f5760; --line: #b8bec5; --accent: #0b5cad; --bad: #a3171f; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #e8eaed; --ground: #16181b; --muted: #aab1b9; --line: #4a5057; --accent: #6cb2f5; --bad: #ff8b92; } }
+  body { margin: 0; padding: 24px 16px; background: var(--ground); color: var(--ink); font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 28rem; margin: 0 auto; }
+  h1 { margin: 0 0 16px; font-size: 24px; line-height: 1.25; }
+  h2 { margin: 0 0 8px; font-size: 18px; }
+  section { margin: 24px 0; padding-top: 16px; border-top: 1px solid var(--line); }
+  label { display: block; margin: 16px 0 4px; font-weight: 600; }
+  input { box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: inherit; font: inherit; }
+  .hint { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+  button { margin-top: 16px; padding: 8px 16px; border: 0; border-radius: 4px; background: var(--accent); color: var(--ground); font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #state { font-weight: 600; }
+  #error { color: var(--bad); font-weight: 600; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>dengai sign-in</h1>
+
+  <p id="state" role="status">Enter the API token to see the status.</p>
+  <p id="error" role="alert"></p>
+
+  <section aria-labelledby="token-title">
+    <h2 id="token-title">API token</h2>
+    <label for="token">DENGAI_API_TOKEN</label>
+    <input id="token" type="password" autocomplete="off" aria-describedby="token-hint">
+    <p id="token-hint" class="hint">Kept in this tab's session storage only, and sent as a bearer token to this page's own address.</p>
+  </section>
+
+  <section id="login" aria-labelledby="login-title" hidden>
+    <h2 id="login-title">Steam account</h2>
+    <form id="login-form">
+      <label for="username">Username</label>
+      <input id="username" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required aria-describedby="password-hint">
+      <p id="password-hint" class="hint">Sent to Steam to sign in. It is not saved or logged.</p>
+      <label for="guard_code">Steam Guard code (optional)</label>
+      <input id="guard_code" autocomplete="one-time-code" aria-describedby="guard-hint">
+      <p id="guard-hint" class="hint">Leave empty to approve in the Steam app instead.</p>
+      <label for="shared_secret">shared_secret (optional)</label>
+      <input id="shared_secret" type="password" autocomplete="off" aria-describedby="secret-hint">
+      <p id="secret-hint" class="hint">Base64 secret of your authenticator. Saved on the device so later sign-ins need no code.</p>
+      <button type="submit" id="login-button">Sign in</button>
+    </form>
+  </section>
+
+  <section id="code" aria-labelledby="code-title" hidden>
+    <h2 id="code-title">Steam Guard code</h2>
+    <form id="code-form">
+      <label for="code-input">Code</label>
+      <input id="code-input" autocomplete="one-time-code" required aria-describedby="code-hint">
+      <p id="code-hint" class="hint">Or approve the sign-in in the Steam app; this page updates by itself.</p>
+      <button type="submit">Send code</button>
+    </form>
+  </section>
+</main>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var tokenInput = $("token");
+  var texts = {
+    connecting: "Connecting to Steam.",
+    needs_login: "Needs login. Enter your Steam account below.",
+    waiting_for_code: "Waiting for a Steam Guard code.",
+    waiting_for_app_approval: "Waiting for approval in the Steam app."
+  };
+  tokenInput.value = sessionStorage.getItem("dengai_token") || "";
+
+  function api(path, body) {
+    var opts = { headers: { Authorization: "Bearer " + tokenInput.value } };
+    if (body) { opts.method = "POST"; opts.body = JSON.stringify(body); }
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, status: r.status, json: j }; });
+    });
+  }
+
+  function show(message) { $("error").textContent = message || ""; }
+
+  function render(s) {
+    var state = s.login;
+    $("state").textContent = state === "logged_in" ? "Logged in as " + s.username + "." : texts[state] || state;
+    $("login").hidden = state !== "needs_login";
+    $("code").hidden = state !== "waiting_for_code";
+    show(state === "needs_login" && s.login_error ? "Sign-in failed: " + s.login_error : "");
+  }
+
+  function poll() {
+    if (!tokenInput.value) { return; }
+    api("/status").then(function (r) {
+      if (r.status === 401) { show("The API token was rejected."); return; }
+      if (r.ok) { render(r.json); }
+    }).catch(function () { show("Cannot reach dengai. Retrying."); });
+  }
+
+  function send(path, body, form) {
+    show("");
+    $("login-button").disabled = true;
+    api(path, body).then(function (r) {
+      if (r.ok) { form.reset(); } else { show(r.json.error || "Request failed (" + r.status + ")."); }
+      poll();
+    }).catch(function () { show("Cannot reach dengai."); }).then(function () { $("login-button").disabled = false; });
+  }
+
+  tokenInput.addEventListener("change", function () {
+    sessionStorage.setItem("dengai_token", tokenInput.value);
+    poll();
+  });
+
+  $("login-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    send("/login", {
+      username: $("username").value,
+      password: $("password").value,
+      guard_code: $("guard_code").value || null,
+      shared_secret: $("shared_secret").value || null
+    }, e.target);
+  });
+
+  $("code-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    send("/login/code", { code: $("code-input").value }, e.target);
+  });
+
+  poll();
+  setInterval(poll, 3000);
+})();
+</script>
+</body>
+</html>

@@ -1,26 +1,63 @@
 //! Small HTTP API with a bearer token, and the types it shares with the bot.
 
 use crate::badges::BadgeGame;
+use crate::totp;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::http::{
+    header::{AUTHORIZATION, CONTENT_SECURITY_POLICY},
+    HeaderMap, StatusCode,
+};
+use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// Most keys or ids in one request.
 const MAX_ITEMS: usize = 50;
 /// How long a request waits for the bot's answer.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+/// Least time between accepted `/login` attempts, so Steam isn't hammered.
+const LOGIN_GAP: Duration = Duration::from_secs(10);
+/// Longest username, password, guard code or shared secret accepted.
+const MAX_FIELD: usize = 256;
+/// The page loads nothing from elsewhere and only talks to its own origin.
+const SETUP_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// Where the Steam login stands, for the setup page.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginState {
+    /// Starting, or reconnecting with the saved refresh token or the configured password.
+    #[default]
+    Connecting,
+    NeedsLogin,
+    /// Steam accepts a code now (approving in the app still works too).
+    WaitingForCode,
+    WaitingForAppApproval,
+    LoggedIn,
+}
+
+/// A login from the setup page. The password is never stored or logged.
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+    pub guard_code: Option<String>,
+    pub shared_secret: Option<String>,
+}
 
 /// What the API sees.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Status {
+    pub login: LoginState,
+    pub username: String,
+    pub login_error: Option<String>,
     pub connected: bool,
     pub steam_id: u64,
     pub farming: Option<BadgeGame>,
@@ -53,6 +90,8 @@ pub struct ItemResult {
 pub enum Command {
     Redeem(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
     AddLicense(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
+    Login(LoginRequest),
+    LoginCode(String),
 }
 
 #[derive(Clone)]
@@ -61,6 +100,7 @@ struct Api {
     shared: Shared,
     tx: mpsc::Sender<Command>,
     pause: watch::Sender<bool>,
+    last_login: Arc<Mutex<Option<Instant>>>,
 }
 
 type Reply = (StatusCode, Json<Value>);
@@ -80,9 +120,12 @@ fn authorized(api: &Api, headers: &HeaderMap) -> bool {
 }
 
 pub fn router(token: String, shared: Shared, tx: mpsc::Sender<Command>, pause: watch::Sender<bool>) -> Router {
-    let api = Api { token: token.into(), shared, tx, pause };
+    let api = Api { token: token.into(), shared, tx, pause, last_login: Arc::default() };
     Router::new()
+        .route("/", get(index))
         .route("/status", get(status))
+        .route("/login", post(login))
+        .route("/login/code", post(login_code))
         .route("/redeem", post(redeem))
         .route("/addlicense", post(addlicense))
         .route("/farm/pause", post(pause_farm))
@@ -168,4 +211,79 @@ async fn pause_farm(State(api): State<Api>, headers: HeaderMap) -> Reply {
 
 async fn resume_farm(State(api): State<Api>, headers: HeaderMap) -> Reply {
     set_paused(api, headers, false).await
+}
+
+async fn index() -> impl IntoResponse {
+    ([(CONTENT_SECURITY_POLICY, SETUP_CSP)], Html(include_str!("setup.html")))
+}
+
+/// Trims the fields and checks them; `None` when the request can't be a login.
+fn clean_login(mut r: LoginRequest) -> Option<LoginRequest> {
+    let blank_is_none = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    r.username = r.username.trim().to_string();
+    r.guard_code = blank_is_none(r.guard_code);
+    r.shared_secret = blank_is_none(r.shared_secret);
+    let fits = |s: &str| (1..=MAX_FIELD).contains(&s.len());
+    let ok = fits(&r.username)
+        && fits(&r.password)
+        && r.guard_code.as_deref().is_none_or(|c| c.len() <= MAX_FIELD)
+        && r.shared_secret.as_deref().is_none_or(|s| s.len() <= MAX_FIELD && totp::steam_code_b64(s, 0).is_ok());
+    ok.then_some(r)
+}
+
+async fn login(State(api): State<Api>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !authorized(&api, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(req) = serde_json::from_slice(&body).ok().and_then(clean_login) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "expected {\"username\", \"password\", \"guard_code\"?, \"shared_secret\"?}",
+        );
+    };
+    {
+        // The state is the lock against concurrent attempts: only the bot moves it back to needs_login.
+        let mut status = api.shared.lock().unwrap();
+        if status.login != LoginState::NeedsLogin {
+            return error(StatusCode::CONFLICT, "not waiting for a login, check /status");
+        }
+        let mut last = api.last_login.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < LOGIN_GAP) {
+            return error(StatusCode::TOO_MANY_REQUESTS, "wait 10 seconds between login attempts");
+        }
+        *last = Some(Instant::now());
+        status.login = LoginState::WaitingForAppApproval;
+        status.login_error = None;
+    }
+    if api.tx.try_send(Command::Login(req)).is_err() {
+        api.shared.lock().unwrap().login = LoginState::NeedsLogin;
+        return error(StatusCode::SERVICE_UNAVAILABLE, "bot busy or stopped, try again");
+    }
+    (StatusCode::ACCEPTED, Json(json!({ "login": LoginState::WaitingForAppApproval })))
+}
+
+#[derive(Deserialize)]
+struct Code {
+    code: String,
+}
+
+async fn login_code(State(api): State<Api>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !authorized(&api, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let code = match serde_json::from_slice::<Code>(&body) {
+        Ok(c)
+            if (1..=16).contains(&c.code.trim().len()) && c.code.trim().chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            c.code.trim().to_string()
+        }
+        _ => return error(StatusCode::BAD_REQUEST, "expected {\"code\": \"ABCDE\"}"),
+    };
+    if api.shared.lock().unwrap().login != LoginState::WaitingForCode {
+        return error(StatusCode::CONFLICT, "steam is not asking for a code, check /status");
+    }
+    if api.tx.try_send(Command::LoginCode(code)).is_err() {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "bot busy or stopped, try again");
+    }
+    (StatusCode::ACCEPTED, Json(json!({ "login": LoginState::WaitingForCode })))
 }

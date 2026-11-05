@@ -9,9 +9,9 @@ const MIN_API_TOKEN_LEN: usize = 16;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Steam account name.
+    /// Steam account name; empty when the first login is done through the setup page.
     pub username: String,
-    /// Password; only needed when there is no saved refresh token.
+    /// Password; only needed for a headless first login (the setup page asks for it otherwise).
     pub password: Option<String>,
     /// Base64 `shared_secret` of the mobile authenticator, to generate Steam Guard codes.
     pub shared_secret: Option<String>,
@@ -168,8 +168,8 @@ impl Config {
             backfill_interval_secs,
             country
         );
-        if cfg.username.is_empty() {
-            return Err("DENGAI_USERNAME (or `username` in the config file) is required".into());
+        if cfg.password.is_some() && cfg.username.is_empty() {
+            return Err("DENGAI_PASSWORD needs DENGAI_USERNAME".into());
         }
         if !cfg.api_token.is_empty() && cfg.api_token.len() < MIN_API_TOKEN_LEN {
             return Err(format!(

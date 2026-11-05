@@ -1,7 +1,7 @@
 //! The Steam session: login, card farming, key redemption, free licenses and PICS auto-claim.
 
 use crate::web::Web;
-use dengai::api::{ClaimLog, Command, ItemResult, Shared, Status};
+use dengai::api::{ClaimLog, Command, ItemResult, LoginRequest, LoginState, Shared, Status};
 use dengai::badges::{self, BadgeGame};
 use dengai::config::Config;
 use dengai::pics::{self, App, Owned, Package, Skip};
@@ -12,8 +12,9 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::pin::pin;
+use std::pin::{pin, Pin};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use steam_vent::auth::{
     AuthConfirmationHandler, ConsoleAuthConfirmationHandler, DeviceConfirmationHandler, FileGuardDataStore,
@@ -35,6 +36,7 @@ use steam_vent_proto::steammessages_clientserver_appinfo::{
     CMsgClientPICSProductInfoResponse,
 };
 use steam_vent_proto::steammessages_clientserver_login::CMsgClientLoggedOff;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, sleep_until, Instant};
 use tracing::{debug, error, info, warn};
@@ -178,6 +180,7 @@ impl Bot {
             self.status(|s| {
                 s.connected = false;
                 s.farming = None;
+                s.login = LoginState::Connecting;
             });
             sleep(Duration::from_secs(wait)).await;
         }
@@ -213,52 +216,155 @@ impl Bot {
         self.save_state();
     }
 
+    /// The configured account, else the one saved by the setup page.
+    fn username(&self) -> String {
+        if self.cfg.username.is_empty() {
+            self.state.username.clone()
+        } else {
+            self.cfg.username.clone()
+        }
+    }
+
+    /// Waits for the setup page to start a login. Without an API token there is no page, so it idles.
+    async fn wait_for_login(&mut self) -> LoginRequest {
+        if self.cfg.api_token.is_empty() {
+            error!("no saved session and no password: set DENGAI_API_TOKEN to sign in on the setup page, or DENGAI_USERNAME and DENGAI_PASSWORD");
+            std::future::pending::<()>().await;
+        }
+        self.status(|s| s.login = LoginState::NeedsLogin);
+        info!("open http://{}/ to sign in", self.cfg.api_bind);
+        loop {
+            match self.rx.recv().await {
+                Some(Command::Login(req)) => return req,
+                // Dropping a Redeem or AddLicense drops its reply, which the API answers with 503.
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    }
+
     async fn connect(&mut self) -> Res<Connection> {
         let cfg = self.cfg.clone();
-        if cfg.shared_secret.is_some() {
+        let username = self.username();
+        let secret_path = cfg.data_dir.join("shared_secret");
+        let saved_secret = cfg.shared_secret.clone().or_else(|| {
+            let s = std::fs::read_to_string(&secret_path).ok()?;
+            Some(s.trim().to_string()).filter(|s| !s.is_empty())
+        });
+        if saved_secret.is_some() {
             self.steam_now().await;
         }
         let servers = ServerList::discover().await.map_err(|e| format!("CM server list: {e}"))?;
         let token_path = cfg.data_dir.join("refresh_token");
-        if let Ok(token) = std::fs::read_to_string(&token_path) {
-            match Connection::access(&servers, &cfg.username, token.trim()).await {
+        let token = std::fs::read_to_string(&token_path).ok().filter(|_| !username.is_empty());
+        if let Some(token) = token {
+            match Connection::access(&servers, &username, token.trim()).await {
                 Ok(c) => return Ok(c),
                 Err(
                     e @ (ConnectionError::AccessToken(_)
                     | ConnectionError::LoginError(LoginError::InvalidCredentials | LoginError::Unknown(_))),
-                ) => warn!("saved refresh token rejected ({e}), logging in with the password"),
+                ) => warn!("saved refresh token rejected ({e}), signing in again"),
                 Err(e) => return Err(format!("connecting with the saved refresh token: {e}")),
             }
         }
-        let password = cfg.password.as_deref().ok_or("no saved refresh token and no password configured")?;
-        let guard = FileGuardDataStore::new(cfg.data_dir.join("guard.json"));
-        let code = match &cfg.shared_secret {
-            Some(s) => Some(totp::steam_code_b64(s, self.steam_now().await)?),
-            None => cfg.guard_code.clone(),
+        let conn = loop {
+            let web = cfg.password.is_none();
+            let mut req = match &cfg.password {
+                Some(password) => LoginRequest {
+                    username: username.clone(),
+                    password: password.clone(),
+                    guard_code: cfg.guard_code.clone(),
+                    shared_secret: saved_secret.clone(),
+                },
+                None => self.wait_for_login().await,
+            };
+            let given_secret = if web { req.shared_secret.clone() } else { None };
+            if web {
+                req.shared_secret = req.shared_secret.or_else(|| saved_secret.clone());
+            }
+            match self.login(&servers, &req, web).await {
+                Ok(conn) => {
+                    if web {
+                        self.state.username = req.username;
+                        self.save_state();
+                        if let Some(secret) = given_secret {
+                            if let Err(e) = write_private(&secret_path, &secret) {
+                                error!("saving {}: {e}", secret_path.display());
+                            }
+                        }
+                    }
+                    break conn;
+                }
+                // Back to the page instead of retrying: the person at it has to fix the input.
+                Err(e) if web => {
+                    warn!("{e}");
+                    self.status(|s| {
+                        s.login = LoginState::NeedsLogin;
+                        s.login_error = Some(e);
+                    });
+                }
+                Err(e) => return Err(e),
+            }
         };
-        let conn = match code {
-            Some(code) => {
-                let input = std::io::Cursor::new(format!("{code}\n").into_bytes());
-                let handler = UserProvidedAuthConfirmationHandler::new(input, tokio::io::sink());
-                Connection::login(&servers, &cfg.username, password, guard, handler).await
-            }
-            None if std::io::stdin().is_terminal() => {
-                info!("confirm the login in the Steam app, or type the Steam Guard code");
-                let handler = DeviceConfirmationHandler.or(ConsoleAuthConfirmationHandler::default());
-                Connection::login(&servers, &cfg.username, password, guard, handler).await
-            }
-            None => {
-                info!("confirm the login in the Steam mobile app (or set DENGAI_SHARED_SECRET / DENGAI_GUARD_CODE)");
-                Connection::login(&servers, &cfg.username, password, guard, DeviceConfirmationHandler).await
-            }
-        }
-        .map_err(|e| format!("login failed: {e}"))?;
         if let Some(token) = conn.access_token() {
             if let Err(e) = write_private(&token_path, token) {
                 error!("saving {}: {e}", token_path.display());
             }
         }
         Ok(conn)
+    }
+
+    async fn login(&mut self, servers: &ServerList, req: &LoginRequest, web: bool) -> Res<Connection> {
+        let guard = FileGuardDataStore::new(self.cfg.data_dir.join("guard.json"));
+        let (user, password) = (req.username.as_str(), req.password.as_str());
+        let code = match &req.shared_secret {
+            Some(s) => Some(totp::steam_code_b64(s, self.steam_now().await)?),
+            None => req.guard_code.clone(),
+        };
+        let result = match code {
+            Some(code) => {
+                let input = std::io::Cursor::new(format!("{code}\n").into_bytes());
+                let handler = UserProvidedAuthConfirmationHandler::new(input, tokio::io::sink());
+                Connection::login(servers, user, password, guard, handler).await
+            }
+            None if web => self.login_on_page(servers, user, password, guard).await,
+            None if std::io::stdin().is_terminal() => {
+                info!("confirm the login in the Steam app, or type the Steam Guard code");
+                let handler = DeviceConfirmationHandler.or(ConsoleAuthConfirmationHandler::default());
+                Connection::login(servers, user, password, guard, handler).await
+            }
+            None => {
+                info!("confirm the login in the Steam mobile app (or set DENGAI_SHARED_SECRET / DENGAI_GUARD_CODE)");
+                Connection::login(servers, user, password, guard, DeviceConfirmationHandler).await
+            }
+        };
+        result.map_err(|e| format!("login failed: {e}"))
+    }
+
+    /// Logs in while the page can approve in the app or feed one code, which reaches the handler as a line.
+    async fn login_on_page(
+        &mut self,
+        servers: &ServerList,
+        user: &str,
+        password: &str,
+        guard: FileGuardDataStore,
+    ) -> Result<Connection, ConnectionError> {
+        let (mut code_in, reader) = tokio::io::duplex(256);
+        let prompt = UserProvidedAuthConfirmationHandler::new(reader, CodePrompt(self.shared.clone()));
+        let mut login = pin!(Connection::login(servers, user, password, guard, DeviceConfirmationHandler.or(prompt)));
+        let mut code_sent = false;
+        loop {
+            tokio::select! {
+                result = &mut login => return result,
+                Some(cmd) = self.rx.recv() => {
+                    // The handler reads one code; a wrong one fails the login.
+                    if let (Command::LoginCode(code), false) = (cmd, code_sent) {
+                        code_sent = true;
+                        let _ = code_in.write_all(format!("{code}\n").as_bytes()).await;
+                    }
+                }
+            }
+        }
     }
 
     async fn session(&mut self, backoff: &mut u64) -> Res<Exit> {
@@ -285,8 +391,12 @@ impl Bot {
             scan_next: Instant::now(),
             blocked: false,
         };
+        let username = self.username();
         self.status(|st| {
             st.connected = true;
+            st.login = LoginState::LoggedIn;
+            st.username = username;
+            st.login_error = None;
             st.steam_id = steam_id;
         });
         for raw in s.conn.take_unprocessed() {
@@ -350,6 +460,7 @@ impl Bot {
                 let r = self.add_licenses(s, ids).await;
                 let _ = reply.send(r);
             }
+            Command::Login(_) | Command::LoginCode(_) => {}
         }
     }
 
@@ -845,4 +956,22 @@ fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> 
     f.write_all(contents.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(tmp, path)
+}
+
+/// Where the code handler writes its prompt; the first write means Steam accepts a code.
+struct CodePrompt(Shared);
+
+impl AsyncWrite for CodePrompt {
+    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        self.0.lock().unwrap().login = LoginState::WaitingForCode;
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }

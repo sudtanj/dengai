@@ -62,6 +62,29 @@ Without `DENGAI_SHARED_SECRET`, dengai waits for you to approve the login in the
 reads a code from the terminal when started interactively, or uses `DENGAI_GUARD_CODE` (email code).
 After the first login only `DENGAI_USERNAME` is needed; remove the password if you like.
 
+## First login on the setup page
+
+A Steam Guard code expires within a minute, so a deploy can't carry one. Instead deploy with only
+`DENGAI_API_TOKEN` (at least 16 characters) and sign in on the page dengai serves at `/`:
+
+1. Reach the API from your machine: `ssh -L 8737:127.0.0.1:8737 <board>`, then open
+   http://127.0.0.1:8737/. Or over Tailscale: set `DENGAI_API_BIND` to the board's tailnet IP and port (for example `100.64.0.5:8737`) and open that address.
+2. Paste the API token (kept in the tab's session storage), then enter username, password and, if you
+   like, a Steam Guard code or your authenticator's `shared_secret`. Otherwise approve the sign-in in
+   the Steam app, or type the code the page asks for.
+
+With no saved refresh token and no `DENGAI_PASSWORD`, dengai waits in `needs_login` and logs
+`open http://<api_bind>/ to sign in`; it doesn't exit. Without `DENGAI_API_TOKEN` there is no page, so
+dengai logs an error and idles.
+
+The username is saved next to the refresh token. The password is never saved or logged. A
+`shared_secret` entered on the page is saved in the data dir (mode 0600), and later sign-ins fill the
+Steam Guard code from it. When Steam rejects the refresh token (it expires after a few months) dengai
+goes back to `needs_login` and you sign in again. `/login` accepts one attempt per 10 seconds.
+
+Setting `DENGAI_USERNAME` and `DENGAI_PASSWORD` (with `DENGAI_SHARED_SECRET` or `DENGAI_GUARD_CODE`) in
+the environment still works for headless setups, exactly as below.
+
 ## Configuration
 
 Every option can be set in a TOML file (`DENGAI_CONFIG`, default `./dengai.toml`, optional) with
@@ -69,8 +92,8 @@ the key name shown, or with an environment variable `DENGAI_<KEY>` (upper case),
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `username` | (required) | Steam account name. |
-| `password` | none | Password, needed only while there is no saved refresh token. |
+| `username` | none | Steam account name; with a password it is required, otherwise the setup page asks for it. |
+| `password` | none | Password, only for a headless first login; leave unset to sign in on the setup page. |
 | `shared_secret` | none | Base64 `shared_secret` of the mobile authenticator; generates Steam Guard codes (on Steam's clock, re-synced every 12 h; local clock if the sync fails). |
 | `guard_code` | none | One-off Steam Guard code (email or app) for the first login. |
 | `data_dir` | `data` (`/data` in Docker) | Holds `refresh_token`, `guard.json` and `state.json`. |
@@ -146,7 +169,7 @@ backfill_interval_secs = 86400
 
 ## HTTP API
 
-All endpoints need `Authorization: Bearer $DENGAI_API_TOKEN`. `/redeem` and `/addlicense` take 1 to 50
+`GET /` (the setup page) is open and holds no secrets. All other endpoints need `Authorization: Bearer $DENGAI_API_TOKEN`. `/redeem` and `/addlicense` take 1 to 50
 items per request and answer 503 if Steam hasn't finished within 120 s (the batch keeps running; see
 `/status`).
 
@@ -166,10 +189,17 @@ curl -H "$AUTH" -X POST $API/farm/pause
 curl -H "$AUTH" -X POST $API/farm/resume
 ```
 
+The setup page uses `POST /login` (`{"username","password","guard_code"?,"shared_secret"?}`, answers 202,
+400 for a bad body, 409 unless `/status` says `needs_login`, 429 within 10 s of the last attempt) and
+`POST /login/code` (`{"code"}`, only while `login` is `waiting_for_code`). `/status` reports `login`
+(`connecting`, `needs_login`, `waiting_for_code`, `waiting_for_app_approval` or `logged_in`), `username`
+and `login_error`.
+
 `/status` returns for example:
 
 ```json
-{"connected":true,"steam_id":76561198000000000,
+{"login":"logged_in","username":"myaccount","login_error":null,
+ "connected":true,"steam_id":76561198000000000,
  "farming":{"appid":440,"name":"Team Fortress 2","drops":3},"games_to_farm":4,
  "farm_paused":false,"playing_blocked":false,"claim_queue":2,"change_number":31234567,
  "recent_claims":[{"id":"sub/123","result":"ok","at":1767225600}]}

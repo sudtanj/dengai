@@ -3,7 +3,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{header::AUTHORIZATION, Request, StatusCode};
 use axum::Router;
-use dengai::api::{router, Command, ItemResult, Shared, Status};
+use dengai::api::{router, Command, ItemResult, LoginState, Shared, Status};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
@@ -100,4 +100,80 @@ async fn pause_and_resume_flip_the_watch_flag() {
     let (status, _) = post(app, "/farm/resume", Some(TOKEN), "").await;
     assert_eq!((status, *pause.borrow_and_update()), (StatusCode::OK, false));
     assert!(rx.try_recv().is_err(), "pausing uses no command slot");
+}
+
+async fn get(app: Router, path: &str, token: Option<&str>) -> (StatusCode, Vec<u8>) {
+    let mut req = Request::builder().uri(path);
+    if let Some(t) = token {
+        req = req.header(AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let status = resp.status();
+    (status, to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec())
+}
+
+fn setup_login(state: LoginState) -> (Router, mpsc::Receiver<Command>, Shared) {
+    let (tx, rx) = mpsc::channel(8);
+    let (pause, _) = watch::channel(false);
+    let shared: Shared = Arc::new(Mutex::new(Status { login: state, ..Status::default() }));
+    (router(TOKEN.into(), shared.clone(), tx, pause), rx, shared)
+}
+
+#[tokio::test]
+async fn setup_page_needs_no_token_but_status_does() {
+    let (app, _rx, _pause) = setup();
+    let (status, page) = get(app.clone(), "/", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8(page).unwrap().contains("<form"));
+    assert_eq!(get(app.clone(), "/status", None).await.0, StatusCode::UNAUTHORIZED);
+    let (status, body) = get(app, "/status", Some(TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["login"], "connecting");
+}
+
+#[tokio::test]
+async fn login_endpoints_need_the_token_and_a_body() {
+    let (app, _rx, _shared) = setup_login(LoginState::NeedsLogin);
+    for path in ["/login", "/login/code"] {
+        assert_eq!(post(app.clone(), path, None, "{}").await.0, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    for body in
+        ["", "{}", r#"{"username":"bob","password":""}"#, r#"{"username":"bob","password":"x","shared_secret":"!!"}"#]
+    {
+        let (status, _) = post(app.clone(), "/login", Some(TOKEN), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    for body in ["", r#"{"code":""}"#, r#"{"code":"AB CD"}"#] {
+        let (status, _) = post(app.clone(), "/login/code", Some(TOKEN), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn login_starts_once_and_is_rate_limited() {
+    let (app, mut rx, shared) = setup_login(LoginState::NeedsLogin);
+    let body = r#"{"username":"bob","password":"hunter2","guard_code":" "}"#;
+    let (status, _) = post(app.clone(), "/login", Some(TOKEN), body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let Some(Command::Login(req)) = rx.recv().await else { panic!("expected a Login command") };
+    assert_eq!((req.username.as_str(), req.guard_code), ("bob", None));
+    assert_eq!(shared.lock().unwrap().login, LoginState::WaitingForAppApproval);
+
+    let (status, _) = post(app.clone(), "/login", Some(TOKEN), body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "one attempt at a time");
+    shared.lock().unwrap().login = LoginState::NeedsLogin;
+    let (status, _) = post(app, "/login", Some(TOKEN), body).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn login_code_only_while_steam_asks() {
+    let (app, mut rx, shared) = setup_login(LoginState::WaitingForAppApproval);
+    let (status, _) = post(app.clone(), "/login/code", Some(TOKEN), r#"{"code":"AB12C"}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    shared.lock().unwrap().login = LoginState::WaitingForCode;
+    let (status, _) = post(app, "/login/code", Some(TOKEN), r#"{"code":" AB12C "}"#).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(matches!(rx.recv().await, Some(Command::LoginCode(c)) if c == "AB12C"));
 }

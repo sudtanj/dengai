@@ -75,6 +75,9 @@ pub fn parse_id_list(body: &str) -> Vec<Id> {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
+    /// Account of the saved refresh token when it was signed in through the setup page.
+    #[serde(default)]
+    pub username: String,
     /// Last PICS change number processed.
     #[serde(default)]
     pub change_number: u32,

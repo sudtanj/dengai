@@ -455,3 +455,13 @@ fn api_token_length_is_checked() {
     assert!(load("0123456789abcdef").is_ok());
     assert!(load("0123456789abcde").unwrap_err().contains("at least 16"));
 }
+
+#[test]
+fn username_is_optional_without_a_password() {
+    let load = |vars: &'static [(&str, &str)]| {
+        dengai::config::Config::load(move |k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()))
+    };
+    assert!(load(&[]).unwrap().username.is_empty());
+    assert!(load(&[("DENGAI_PASSWORD", "x")]).unwrap_err().contains("needs DENGAI_USERNAME"));
+    assert!(load(&[("DENGAI_PASSWORD", "x"), ("DENGAI_USERNAME", "bob")]).is_ok());
+}
