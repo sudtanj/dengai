@@ -4,6 +4,8 @@ A tiny stand-in for [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamF
 Steam account, built to run all the time on a 1 GB board such as the Orange Pi Zero 3. One static
 binary, one process per account, no plugins, no web UI.
 
+<!-- bench:summary -->Measured numbers appear here after the first Benchmark workflow run.<!-- /bench:summary -->
+
 What it does:
 
 - **Login** through Steam's `IAuthenticationService` flow (password + Steam Guard code from your
@@ -244,6 +246,18 @@ Target: under 30 MB resident memory and near-zero CPU while idling, so it fits n
 containers on a 1 GB board. It runs on a single-threaded Tokio runtime, keeps only package/app ids
 in memory, and parses PICS data batch by batch. The release build uses `opt-level = "s"`, fat LTO,
 one codegen unit, `panic = "abort"` and stripping; there is no OpenSSL anywhere (rustls).
+
+## Benchmark
+
+The Benchmark workflow (`.github/workflows/bench.yml`) runs `tests/memory_bench.rs` on a native
+arm64 GitHub runner after every code change on `main` and rewrites this section and the summary
+line at the top. It starts the release binary with no Steam account, so the bot waits for a login
+on the setup page and nothing depends on Steam; only the HTTP API is loaded. The Orange Pi's
+slower cores will add latency under load; memory carries over.
+
+<!-- bench:report -->
+The numbers appear after the first run of the Benchmark workflow.
+<!-- /bench:report -->
 
 ## Build
 

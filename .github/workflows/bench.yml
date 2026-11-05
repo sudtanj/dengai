@@ -1,0 +1,49 @@
+name: Benchmark
+
+# Memory and latency of the release binary on a native arm64 runner (the Orange Pi Zero 3 is
+# aarch64). The tables land in the job summary and, on main, in the README (between the bench
+# markers); see tests/memory_bench.rs for what is measured.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "tests/memory_bench.rs"
+      - ".github/workflows/bench.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bench
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  memory:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-arm64
+      - name: Benchmark
+        env:
+          BENCH_README: ${{ github.workspace }}/README.md
+        run: cargo test --release --locked --test memory_bench -- --ignored --nocapture
+      - name: Commit README
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git diff --quiet README.md && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -q -m "docs: benchmark numbers for ${GITHUB_SHA::7}"
+          git pull -q --rebase origin main
+          git push origin HEAD:main
