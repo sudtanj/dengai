@@ -1,6 +1,6 @@
 name: Benchmark
 
-# Memory and latency of the release binary on a native arm64 runner (the Orange Pi Zero 3 is
+# Memory and latency of the release binary on native x86_64 and arm64 runners (the Orange Pi Zero 3 is
 # aarch64). The tables land in the job summary and, on main, in the README (between the bench
 # markers); see tests/memory_bench.rs for what is measured.
 on:
@@ -26,13 +26,17 @@ env:
 
 jobs:
   memory:
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: bench-arm64
+          key: bench-${{ matrix.runner }}
       - name: Benchmark
         env:
           BENCH_README: ${{ github.workspace }}/README.md
@@ -44,6 +48,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add README.md
-          git commit -q -m "docs: benchmark numbers for ${GITHUB_SHA::7}"
-          git pull -q --rebase origin main
-          git push origin HEAD:main
+          git commit -q -m "docs: $(uname -m) benchmark numbers for ${GITHUB_SHA::7}"
+          # The other arch's job pushes to its own README section around the same time.
+          for attempt in 1 2 3 4 5; do
+            git pull -q --rebase origin main && git push origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1

@@ -4,7 +4,7 @@ A tiny stand-in for [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamF
 Steam account, built to run all the time on a 1 GB board such as the Orange Pi Zero 3. One static
 binary, one process per account, no plugins, no web UI.
 
-<!-- bench:summary -->Measured: a 4.3 MiB binary whose API is ready 12.00 ms after start and that idles at 6.3 MiB RSS with 2 thread(s); 50 concurrent API requests peak at 7.4 MiB (see [Benchmark](#benchmark)).<!-- /bench:summary -->
+<!-- bench:summary -->Measured on aarch64: a 4.3 MiB binary whose API is ready 12.00 ms after start and that idles at 6.3 MiB RSS with 2 thread(s); 50 concurrent API requests peak at 7.4 MiB (see [Benchmark](#benchmark)).<!-- /bench:summary -->
 
 What it does:
 
@@ -249,13 +249,15 @@ one codegen unit, `panic = "abort"` and stripping; there is no OpenSSL anywhere 
 
 ## Benchmark
 
-The Benchmark workflow (`.github/workflows/bench.yml`) runs `tests/memory_bench.rs` on a native
-arm64 GitHub runner after every code change on `main` and rewrites this section and the summary
-line at the top. It starts the release binary with no Steam account, so the bot waits for a login
-on the setup page and nothing depends on Steam; only the HTTP API is loaded. The Orange Pi's
+The Benchmark workflow (`.github/workflows/bench.yml`) runs `tests/memory_bench.rs` on native
+x86_64 and arm64 GitHub runners after every code change on `main` and rewrites this section and
+the summary line at the top (arm64, the Orange Pi's arch). It starts the release binary with no
+Steam account, so the bot waits for a login on the setup page and nothing depends on Steam; only the HTTP API is loaded. The Orange Pi's
 slower cores will add latency under load; memory carries over.
 
-<!-- bench:report -->
+### arm64 (aarch64)
+
+<!-- bench:report-aarch64 -->
 Measured on aarch64 at commit `3c0ed1f`. Binary 4.3 MiB. There is no Steam account in the benchmark: the bot waits for a login on the setup page, and the load is 5000 requests per level, alternating `GET /status` (with the token) and the open `GET /`, so the numbers do not depend on Steam. Client and server share the machine and the server runs on a single-threaded Tokio runtime.
 
 Ready 12.00 ms after spawn (API accepting requests).
@@ -272,7 +274,13 @@ Ready 12.00 ms after spawn (API accepting requests).
 | 1 | 5000 | 0 | 18387 | 0.05 ms | 0.08 ms | 6.3 MiB |
 | 10 | 5000 | 0 | 54827 | 0.17 ms | 0.24 ms | 6.5 MiB |
 | 50 | 5000 | 0 | 48714 | 1.02 ms | 1.67 ms | 7.4 MiB |
-<!-- /bench:report -->
+<!-- /bench:report-aarch64 -->
+
+### x86_64
+
+<!-- bench:report-x86_64 -->
+Not measured yet; the next Benchmark run fills this in.
+<!-- /bench:report-x86_64 -->
 
 ## Build
 

@@ -1,7 +1,7 @@
 //! Memory and latency benchmark: the release binary with no Steam account, so the bot sits waiting for a
 //! login on the setup page and only the HTTP API is exercised. Ignored by `cargo test`; run it with
 //! `cargo test --release --test memory_bench -- --ignored --nocapture` (Linux only, it reads `/proc`).
-//! `.github/workflows/bench.yml` runs it on an arm64 runner and writes the tables to the job summary and
+//! `.github/workflows/bench.yml` runs it on x86_64 and arm64 runners and writes the tables to the job summary and
 //! the README.
 #![cfg(target_os = "linux")]
 
@@ -253,11 +253,15 @@ async fn memory_and_latency() {
     }
     assert!(errors.is_empty(), "some benchmark requests failed; see the report above");
 
-    // The workflow passes BENCH_README=README.md to refresh the numbers quoted there.
+    // The workflow passes BENCH_README=README.md to refresh the numbers quoted there. Each arch owns its
+    // report section; the summary line quotes aarch64, the Orange Pi's arch.
     if let Ok(path) = std::env::var("BENCH_README") {
+        let arch = std::env::consts::ARCH;
+        let mut readme = std::fs::read_to_string(&path).unwrap();
+        readme = replace_marked(&readme, &format!("report-{arch}"), &format!("\n{}\n", md.trim()));
         let last = runs.last().unwrap();
         let line = format!(
-            "Measured: a {size_mib:.1} MiB binary whose API is ready {} after start and that idles at {} RSS with {} \
+            "Measured on aarch64: a {size_mib:.1} MiB binary whose API is ready {} after start and that idles at {} RSS with {} \
              thread(s); {} concurrent API requests peak at {} (see [Benchmark](#benchmark)).",
             ms(ready),
             mib(idle.rss_kb),
@@ -265,9 +269,9 @@ async fn memory_and_latency() {
             last.concurrency,
             mib(last.peak_kb),
         );
-        let readme = std::fs::read_to_string(&path).unwrap();
-        let readme = replace_marked(&readme, "summary", &line);
-        let readme = replace_marked(&readme, "report", &format!("\n{}\n", md.trim()));
+        if arch == "aarch64" {
+            readme = replace_marked(&readme, "summary", &line);
+        }
         std::fs::write(&path, readme).unwrap();
     }
 }
