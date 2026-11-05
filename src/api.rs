@@ -90,6 +90,7 @@ pub struct ItemResult {
 pub enum Command {
     Redeem(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
     AddLicense(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
+    Queue(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
     Login(LoginRequest),
     LoginCode(String),
 }
@@ -128,6 +129,7 @@ pub fn router(token: String, shared: Shared, tx: mpsc::Sender<Command>, pause: w
         .route("/login/code", post(login_code))
         .route("/redeem", post(redeem))
         .route("/addlicense", post(addlicense))
+        .route("/queue", post(queue))
         .route("/farm/pause", post(pause_farm))
         .route("/farm/resume", post(resume_farm))
         .with_state(api)
@@ -191,6 +193,16 @@ async fn addlicense(State(api): State<Api>, headers: HeaderMap, body: Bytes) -> 
     }
     match serde_json::from_slice::<Ids>(&body) {
         Ok(i) if (1..=MAX_ITEMS).contains(&i.ids.len()) => run(&api, |tx| Command::AddLicense(i.ids, tx)).await,
+        _ => error(StatusCode::BAD_REQUEST, "expected {\"ids\": [\"sub/123\", \"a/456\", ...]} with 1 to 50 ids"),
+    }
+}
+
+async fn queue(State(api): State<Api>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !authorized(&api, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    match serde_json::from_slice::<Ids>(&body) {
+        Ok(i) if (1..=MAX_ITEMS).contains(&i.ids.len()) => run(&api, |tx| Command::Queue(i.ids, tx)).await,
         _ => error(StatusCode::BAD_REQUEST, "expected {\"ids\": [\"sub/123\", \"a/456\", ...]} with 1 to 50 ids"),
     }
 }

@@ -51,6 +51,8 @@ async fn bad_bodies_are_rejected() {
         ("/redeem", too_many("keys")),
         ("/addlicense", r#"{"keys":["sub/1"]}"#.to_string()),
         ("/addlicense", too_many("ids")),
+        ("/queue", r#"{"ids":[]}"#.to_string()),
+        ("/queue", too_many("ids")),
     ] {
         let (status, _) = post(app.clone(), path, Some(TOKEN), &body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path} {body:.40}");
@@ -75,6 +77,21 @@ async fn redeem_returns_the_bots_results() {
         body,
         json!({ "results": [{ "id": "AAAAA-BBBBB-CCCCC", "ok": true, "result": "ok", "items": ["Some Game"] }] })
     );
+}
+
+#[tokio::test]
+async fn queue_hands_the_ids_to_the_bot() {
+    let (app, mut rx, _pause) = setup();
+    let bot = tokio::spawn(async move {
+        let Some(Command::Queue(ids, reply)) = rx.recv().await else { panic!("expected a Queue command") };
+        assert_eq!(ids, ["sub/1", "a/2"]);
+        let results = ids.into_iter().map(|id| ItemResult { id, ok: true, result: "queued".into(), items: vec![] });
+        let _ = reply.send(results.collect());
+    });
+    let (status, body) = post(app, "/queue", Some(TOKEN), r#"{"ids":["sub/1","a/2"]}"#).await;
+    bot.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["results"][1], json!({ "id": "a/2", "ok": true, "result": "queued" }));
 }
 
 #[tokio::test]

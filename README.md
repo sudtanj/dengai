@@ -171,7 +171,7 @@ backfill_interval_secs = 86400
 
 ## HTTP API
 
-`GET /` (the setup page) is open and holds no secrets. All other endpoints need `Authorization: Bearer $DENGAI_API_TOKEN`. `/redeem` and `/addlicense` take 1 to 50
+`GET /` (the setup page) is open and holds no secrets. All other endpoints need `Authorization: Bearer $DENGAI_API_TOKEN`. `/redeem`, `/addlicense` and `/queue` take 1 to 50
 items per request and answer 503 if Steam hasn't finished within 120 s (the batch keeps running; see
 `/status`).
 
@@ -186,6 +186,10 @@ curl -H "$AUTH" -d '{"keys":["AAAAA-BBBBB-CCCCC"]}' $API/redeem
 
 # free licenses: sub/<id> (store) or a/<id> (free app)
 curl -H "$AUTH" -d '{"ids":["sub/123","a/456"]}' $API/addlicense
+
+# same ids, claimed later: put at the front of the auto-claim queue, paced by claims_per_hour and
+# the rate-limit back-off; answers "queued" or "already claimed, rejected or queued" per id
+curl -H "$AUTH" -d '{"ids":["sub/123","a/456"]}' $API/queue
 
 curl -H "$AUTH" -X POST $API/farm/pause
 curl -H "$AUTH" -X POST $API/farm/resume

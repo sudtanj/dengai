@@ -460,6 +460,9 @@ impl Bot {
                 let r = self.add_licenses(s, ids).await;
                 let _ = reply.send(r);
             }
+            Command::Queue(ids, reply) => {
+                let _ = reply.send(self.queue_licenses(ids));
+            }
             Command::Login(_) | Command::LoginCode(_) => {}
         }
     }
@@ -540,6 +543,26 @@ impl Bot {
             self.log_claim(id.to_string(), result.clone());
             out.push(ItemResult { id: id.into(), ok, result, items: vec![] });
         }
+        out
+    }
+
+    /// Puts licenses at the front of the auto-claim queue, ahead of the PICS backlog, since promos
+    /// expire. They are claimed within `claims_per_hour` and the rate-limit back-off.
+    fn queue_licenses(&mut self, ids: Vec<String>) -> Vec<ItemResult> {
+        let mut out = Vec::new();
+        for raw in ids {
+            let id = raw.trim().to_string();
+            let (ok, result) = match id.parse::<Id>() {
+                Ok(lic) if self.state.known(lic) => (false, "already claimed, rejected or queued".to_string()),
+                Ok(lic) => {
+                    self.state.queue.push_front(lic);
+                    (true, "queued".to_string())
+                }
+                Err(e) => (false, e),
+            };
+            out.push(ItemResult { id, ok, result, items: vec![] });
+        }
+        self.save_state();
         out
     }
 
