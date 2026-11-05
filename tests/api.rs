@@ -124,7 +124,8 @@ async fn setup_page_needs_no_token_but_status_does() {
     let (app, _rx, _pause) = setup();
     let (status, page) = get(app.clone(), "/", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(String::from_utf8(page).unwrap().contains("<form"));
+    let page = String::from_utf8(page).unwrap();
+    assert!(page.contains("<form") && page.contains("id=\"claims-table\""));
     assert_eq!(get(app.clone(), "/status", None).await.0, StatusCode::UNAUTHORIZED);
     let (status, body) = get(app, "/status", Some(TOKEN)).await;
     assert_eq!(status, StatusCode::OK);

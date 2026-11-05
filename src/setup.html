@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>dengai sign-in</title>
+<title>dengai</title>
 <style>
   :root { color-scheme: light dark; --ink: #1b1f23; --ground: #fafaf8; --muted: #4f5760; --line: #b8bec5; --accent: #0b5cad; --bad: #a3171f; }
   @media (prefers-color-scheme: dark) { :root { --ink: #e8eaed; --ground: #16181b; --muted: #aab1b9; --line: #4a5057; --accent: #6cb2f5; --bad: #ff8b92; } }
   body { margin: 0; padding: 24px 16px; background: var(--ground); color: var(--ink); font: 16px/1.5 system-ui, sans-serif; }
-  main { max-width: 28rem; margin: 0 auto; }
+  main { max-width: 40rem; margin: 0 auto; }
   h1 { margin: 0 0 16px; font-size: 24px; line-height: 1.25; }
   h2 { margin: 0 0 8px; font-size: 18px; }
   section { margin: 24px 0; padding-top: 16px; border-top: 1px solid var(--line); }
@@ -22,12 +22,21 @@
   :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   #state { font-weight: 600; }
   #error { color: var(--bad); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { font-size: 14px; color: var(--muted); }
+  a { color: var(--accent); }
+  .ok { color: inherit; }
+  .fail { color: var(--bad); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
   [hidden] { display: none; }
 </style>
 </head>
 <body>
 <main>
-  <h1>dengai sign-in</h1>
+  <h1>dengai</h1>
 
   <p id="state" role="status">Enter the API token to see the status.</p>
   <p id="error" role="alert"></p>
@@ -66,6 +75,27 @@
       <button type="submit">Send code</button>
     </form>
   </section>
+
+  <section id="farm" aria-labelledby="farm-title" hidden>
+    <h2 id="farm-title">Card farming</h2>
+    <dl>
+      <dt>Now farming</dt><dd id="farm-game"></dd>
+      <dt>Drops left</dt><dd id="farm-drops"></dd>
+      <dt>Games with drops</dt><dd id="farm-games"></dd>
+    </dl>
+    <button type="button" id="pause-button"></button>
+  </section>
+
+  <section id="claims" aria-labelledby="claims-title" hidden>
+    <h2 id="claims-title">Free licenses</h2>
+    <p id="claims-queue"></p>
+    <p id="claims-empty" class="hint" hidden>No claims yet. dengai watches Steam for new free packages and claims them as they appear.</p>
+    <table id="claims-table" hidden>
+      <caption class="hint" style="text-align: left">Latest 20 claims, newest first</caption>
+      <thead><tr><th scope="col">Time</th><th scope="col">Item</th><th scope="col">Result</th></tr></thead>
+      <tbody id="claims-body"></tbody>
+    </table>
+  </section>
 </main>
 <script>
 (function () {
@@ -95,6 +125,53 @@
     $("login").hidden = state !== "needs_login";
     $("code").hidden = state !== "waiting_for_code";
     show(state === "needs_login" && s.login_error ? "Sign-in failed: " + s.login_error : "");
+    var on = state === "logged_in";
+    $("farm").hidden = !on;
+    $("claims").hidden = !on;
+    if (on) { renderFarm(s); renderClaims(s); }
+  }
+
+  function link(href, text) {
+    var a = document.createElement("a");
+    a.href = href; a.textContent = text; a.rel = "noreferrer"; a.target = "_blank";
+    return a;
+  }
+
+  function storeLink(id) {
+    var m = /^(sub|a)\/(\d+)$/.exec(id);
+    return m ? link("https://store.steampowered.com/" + (m[1] === "a" ? "app" : "sub") + "/" + m[2] + "/", id) : document.createTextNode(id);
+  }
+
+  function renderFarm(s) {
+    var game = $("farm-game"), g = s.farming;
+    game.textContent = "";
+    if (g) {
+      game.appendChild(link("https://store.steampowered.com/app/" + g.appid + "/", g.name || "app " + g.appid));
+    } else {
+      game.textContent = s.farm_paused ? "Paused" : s.playing_blocked ? "Paused while you play on another device"
+        : s.games_to_farm ? "Starting" : "Nothing, no card drops left";
+    }
+    $("farm-drops").textContent = g ? g.drops : "–";
+    $("farm-games").textContent = s.games_to_farm;
+    $("pause-button").textContent = s.farm_paused ? "Resume farming" : "Pause farming";
+    $("pause-button").dataset.paused = s.farm_paused ? "1" : "";
+  }
+
+  function renderClaims(s) {
+    var list = s.recent_claims || [], body = $("claims-body");
+    $("claims-queue").textContent = s.claim_queue + (s.claim_queue === 1 ? " license" : " licenses") + " waiting to be claimed.";
+    $("claims-empty").hidden = list.length > 0;
+    $("claims-table").hidden = list.length === 0;
+    body.textContent = "";
+    list.forEach(function (c) {
+      var tr = document.createElement("tr"), when = document.createElement("td"), item = document.createElement("td"), res = document.createElement("td");
+      when.textContent = new Date(c.at * 1000).toLocaleString();
+      item.appendChild(storeLink(c.id));
+      res.textContent = c.result === "ok" ? "Claimed" : c.result;
+      res.className = c.result === "ok" ? "ok" : "fail";
+      tr.append(when, item, res);
+      body.appendChild(tr);
+    });
   }
 
   function poll() {
@@ -127,6 +204,16 @@
       guard_code: $("guard_code").value || null,
       shared_secret: $("shared_secret").value || null
     }, e.target);
+  });
+
+  $("pause-button").addEventListener("click", function (e) {
+    var b = e.target;
+    b.disabled = true;
+    show("");
+    api(b.dataset.paused ? "/farm/resume" : "/farm/pause", {}).then(function (r) {
+      if (!r.ok) { show(r.json.error || "Request failed (" + r.status + ")."); }
+      poll();
+    }).catch(function () { show("Cannot reach dengai."); }).then(function () { b.disabled = false; });
   });
 
   $("code-form").addEventListener("submit", function (e) {

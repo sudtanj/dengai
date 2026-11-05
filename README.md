@@ -72,6 +72,8 @@ A Steam Guard code expires within a minute, so a deploy can't carry one. Instead
 2. Paste the API token (kept in the tab's session storage), then enter username, password and, if you
    like, a Steam Guard code or your authenticator's `shared_secret`. Otherwise approve the sign-in in
    the Steam app, or type the code the page asks for.
+3. Once signed in, the same page shows the game being farmed, its drops left, the latest 20 license
+   claims with their results, and a button to pause or resume farming. It refreshes every 3 s.
 
 With no saved refresh token and no `DENGAI_PASSWORD`, dengai waits in `needs_login` and logs
 `open http://<api_bind>/ to sign in`; it doesn't exit. Without `DENGAI_API_TOKEN` there is no page, so
