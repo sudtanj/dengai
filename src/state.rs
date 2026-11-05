@@ -105,10 +105,16 @@ pub struct State {
 pub const MAX_RETRIES: u8 = 5;
 
 impl State {
-    /// Loads the state, or an empty one when the file doesn't exist.
+    /// Loads the state, or an empty one when the file doesn't exist. Drops duplicate queue entries
+    /// and ones already claimed or rejected, which older versions could leave behind.
     pub fn load(path: &Path) -> Result<State, String> {
         match std::fs::read(path) {
-            Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", path.display())),
+            Ok(b) => {
+                let mut s: State = serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", path.display()))?;
+                let (done, rejected, mut seen) = (&s.done, &s.rejected, BTreeSet::new());
+                s.queue.retain(|id| !done.contains(id) && !rejected.contains(id) && seen.insert(*id));
+                Ok(s)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }

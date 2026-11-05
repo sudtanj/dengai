@@ -314,6 +314,8 @@ fn state_and_bucket() {
     let loaded = State::load(&path).unwrap();
     assert_eq!((loaded.change_number, loaded.queue.len(), loaded.rejected.len()), (42, 2, 1));
     assert_eq!(loaded.queue, [Id::Sub(5), Id::App(5)]);
+    std::fs::write(&path, r#"{"queue":["sub/5","a/5","sub/5","sub/6","a/5"],"done":["sub/6"]}"#).unwrap();
+    assert_eq!(State::load(&path).unwrap().queue, [Id::Sub(5), Id::App(5)], "duplicates and done ids drop");
     std::fs::remove_dir_all(&dir).unwrap();
 
     let mut b = TokenBucket::new(30, 1000);
