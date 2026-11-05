@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 /// Shortest accepted `api_token`: it is the only thing between the network and the account.
-const MIN_API_TOKEN_LEN: usize = 16;
+const MIN_API_TOKEN_LEN: usize = 12;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -23,7 +23,7 @@ pub struct Config {
     pub log: String,
     /// API listen address.
     pub api_bind: String,
-    /// Bearer token for the API, at least 16 characters. The API is off when empty.
+    /// Bearer token for the API, at least 12 characters. The API is off when empty.
     pub api_token: String,
     /// Farm card drops.
     pub farm: bool,

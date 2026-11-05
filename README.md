@@ -65,7 +65,7 @@ After the first login only `DENGAI_USERNAME` is needed; remove the password if y
 ## First login on the setup page
 
 A Steam Guard code expires within a minute, so a deploy can't carry one. Instead deploy with only
-`DENGAI_API_TOKEN` (at least 16 characters) and sign in on the page dengai serves at `/`:
+`DENGAI_API_TOKEN` (at least 12 characters) and sign in on the page dengai serves at `/`:
 
 1. Reach the API from your machine: `ssh -L 8737:127.0.0.1:8737 <board>`, then open
    http://127.0.0.1:8737/. Or over Tailscale: set `DENGAI_API_BIND` to the board's tailnet IP and port (for example `100.64.0.5:8737`) and open that address.
@@ -99,7 +99,7 @@ the key name shown, or with an environment variable `DENGAI_<KEY>` (upper case),
 | `data_dir` | `data` (`/data` in Docker) | Holds `refresh_token`, `guard.json` and `state.json`. |
 | `log` | `info` | `error`, `warn`, `info`, `debug` or `trace`. |
 | `api_bind` | `127.0.0.1:8737` | API listen address. |
-| `api_token` | empty | Bearer token for the API, at least 16 characters (startup fails on a shorter one). The API is off when empty. |
+| `api_token` | empty | Bearer token for the API, at least 12 characters (startup fails on a shorter one). The API is off when empty. |
 | `farm` | `true` | Farm card drops. |
 | `farm_check_secs` | `300` | Seconds between drop checks of the game being played (min 60). |
 | `farm_rescan_secs` | `21600` | Seconds between badge scans when nothing is left to farm. |

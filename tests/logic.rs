@@ -452,8 +452,8 @@ fn api_token_length_is_checked() {
         })
     };
     assert!(load("").is_ok(), "an empty token disables the API");
-    assert!(load("0123456789abcdef").is_ok());
-    assert!(load("0123456789abcde").unwrap_err().contains("at least 16"));
+    assert!(load("0123456789ab").is_ok());
+    assert!(load("0123456789a").unwrap_err().contains("at least 12"));
 }
 
 #[test]
