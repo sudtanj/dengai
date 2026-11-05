@@ -115,7 +115,7 @@ impl Sampler {
 /// One request: `GET /status` with the token on even `i`, the open `GET /` on odd `i`.
 async fn one(http: &reqwest::Client, base: &str, i: usize) -> Result<Duration, String> {
     let started = Instant::now();
-    let resp = if i % 2 == 0 {
+    let resp = if i.is_multiple_of(2) {
         http.get(format!("{base}/status")).bearer_auth(TOKEN).send().await
     } else {
         http.get(base).send().await
