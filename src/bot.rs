@@ -548,17 +548,17 @@ impl Bot {
     }
 
     /// Puts licenses at the front of the auto-claim queue, ahead of the PICS backlog, since promos
-    /// expire. They are claimed within `claims_per_hour` and the rate-limit back-off. Ones locked out of
-    /// the account's country are rejected up front so they don't sit in the queue.
+    /// expire. They are claimed within `claims_per_hour` and the rate-limit back-off. Ones PICS shows
+    /// unclaimable (not free, region-locked, ...) are rejected up front so they don't spend claims.
     async fn queue_licenses(&mut self, s: &mut Session, ids: Vec<String>) -> Vec<ItemResult> {
         let ids: Vec<String> = ids.iter().map(|raw| raw.trim().to_string()).collect();
         let fresh: Vec<Id> =
             ids.iter().filter_map(|id| id.parse::<Id>().ok()).filter(|id| !self.state.known(*id)).collect();
-        let blocked = match self.region_locks(s, &fresh).await {
+        let blocked = match self.unclaimable(s, &fresh).await {
             Ok(b) => b,
             Err(e) => {
-                // The claim itself still gets Steam's "not available in your country".
-                warn!("queue: region check skipped: {e}");
+                // The claim itself still gets Steam's verdict.
+                warn!("queue: PICS check skipped: {e}");
                 HashMap::new()
             }
         };
@@ -568,7 +568,7 @@ impl Bot {
                 Ok(lic) if self.state.known(lic) => (false, "already claimed, rejected or queued".to_string()),
                 Ok(lic) if blocked.contains_key(&lic) => {
                     self.state.rejected.insert(lic);
-                    (false, format!("rejected: {} ({})", blocked[&lic], s.owned.country))
+                    (false, format!("rejected: {}", blocked[&lic]))
                 }
                 Ok(lic) => {
                     self.state.queue.push_front(lic);
@@ -582,10 +582,10 @@ impl Bot {
         out
     }
 
-    /// The ids among `ids` that PICS says the account's country can't see or buy (a package also when one
-    /// of its apps is locked). Ids PICS doesn't return are left to the claim.
-    async fn region_locks(&self, s: &Session, ids: &[Id]) -> Res<HashMap<Id, &'static str>> {
-        let country = s.owned.country.as_str();
+    /// The ids among `ids` that fail the same PICS filter as the backlog (not free, region-locked, owned,
+    /// ...): the store answers those with 403 "access denied" anyway. Ids PICS doesn't return are left to
+    /// the claim.
+    async fn unclaimable(&self, s: &Session, ids: &[Id]) -> Res<HashMap<Id, &'static str>> {
         let subs: Vec<u32> = ids.iter().filter_map(|id| if let Id::Sub(n) = id { Some(*n) } else { None }).collect();
         let apps: Vec<u32> = ids.iter().filter_map(|id| if let Id::App(n) = id { Some(*n) } else { None }).collect();
         let mut locks = HashMap::new();
@@ -600,15 +600,17 @@ impl Bot {
         for chunk in contents.chunks(APP_CHUNK) {
             info.extend(self.product_info(s, &[], chunk).await?.1);
         }
-        let app_region = |id: &u32| info.get(id).map_or(Ok(()), |a| pics::app_region(a, country));
+        let (now, skip) = (now(), self.skip());
         for p in &packages {
-            let locked = pics::package_region(p, country).and_then(|()| p.app_ids.iter().try_for_each(app_region));
-            if let Err(why) = locked {
+            let contents: Vec<App> = p.app_ids.iter().filter_map(|id| info.get(id).cloned()).collect();
+            let verdict =
+                pics::precheck(p, &s.owned, now).and_then(|()| pics::check_apps(p, &contents, &s.owned, skip));
+            if let Err(why) = verdict {
                 locks.insert(Id::Sub(p.id), why);
             }
         }
         for n in &apps {
-            if let Err(why) = app_region(n) {
+            if let Some(Err(why)) = info.get(n).map(|a| pics::check_app(a, &s.owned, skip)) {
                 locks.insert(Id::App(*n), why);
             }
         }
