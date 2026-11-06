@@ -148,6 +148,10 @@ never claimed as apps: FreePackages joins them through the store's playtest requ
 doesn't implement. When Steam answers OK but grants nothing (usually region-locked), the app is
 marked rejected and not tried again.
 
+After each start, queued ids are run through the filter again (100 at a time, just before they are
+claimed) and the failing ones dropped, so entries that went stale or were queued by an older build don't
+spend claims.
+
 The queue (`sub/<id>` and `a/<id>` entries), the done/rejected sets, the last PICS change number
 and the backfill time are kept in `data_dir/state.json` (written atomically).
 
@@ -219,7 +223,8 @@ and `login_error`.
 
 `POST /mcp` is an [MCP](https://modelcontextprotocol.io) server (stateless Streamable HTTP, JSON replies, no
 sessions or SSE) behind the same bearer token, so an MCP gateway can inspect and debug the bot. Tools: `status`,
-`queue` and `add_license` (`ids`), `redeem` (`keys`), `farm_pause`, `farm_resume`. They return what the matching HTTP
+`queue` and `add_license` (`ids`), `redeem` (`keys`), `farm_pause`, `farm_resume`, and `check` (`ids`: the filter
+verdict and the PICS info behind it, without claiming). The others return what the matching HTTP
 endpoint returns, as text. Login is not exposed.
 
 ```sh

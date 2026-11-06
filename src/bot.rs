@@ -9,7 +9,7 @@ use dengai::purchase::{self, Claim};
 use dengai::state::{self, Id, State, MAX_RETRIES};
 use dengai::{now, totp};
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::pin::{pin, Pin};
@@ -56,6 +56,8 @@ enum Exit {
 }
 
 type Res<T> = Result<T, String>;
+/// Filter verdict per id, with the product info it was based on.
+type Verdicts = HashMap<Id, (Result<(), &'static str>, String)>;
 
 fn net(e: NetworkError) -> String {
     format!("steam: {e}")
@@ -87,6 +89,8 @@ pub struct Bot {
     backfill_retry: u64,
     /// Backfill ids not checked yet; lost on restart, which just fetches the list again.
     backfill_pending: Vec<Id>,
+    /// Queued ids re-checked with PICS since start; the rest are re-checked before they're claimed.
+    checked: HashSet<Id>,
 }
 
 /// Per-connection state.
@@ -140,6 +144,7 @@ impl Bot {
             clock: None,
             backfill_retry: 0,
             backfill_pending: Vec::new(),
+            checked: HashSet::new(),
         })
     }
 
@@ -464,6 +469,10 @@ impl Bot {
                 let r = self.queue_licenses(s, ids).await;
                 let _ = reply.send(r);
             }
+            Command::Check(ids, reply) => {
+                let r = self.check(s, ids).await;
+                let _ = reply.send(r);
+            }
             Command::Login(_) | Command::LoginCode(_) => {}
         }
     }
@@ -554,8 +563,8 @@ impl Bot {
         let ids: Vec<String> = ids.iter().map(|raw| raw.trim().to_string()).collect();
         let fresh: Vec<Id> =
             ids.iter().filter_map(|id| id.parse::<Id>().ok()).filter(|id| !self.state.known(*id)).collect();
-        let blocked = match self.unclaimable(s, &fresh).await {
-            Ok(b) => b,
+        let verdicts = match self.verdicts(s, &fresh).await {
+            Ok(v) => v,
             Err(e) => {
                 // The claim itself still gets Steam's verdict.
                 warn!("queue: PICS check skipped: {e}");
@@ -566,14 +575,16 @@ impl Bot {
         for id in ids {
             let (ok, result) = match id.parse::<Id>() {
                 Ok(lic) if self.state.known(lic) => (false, "already claimed, rejected or queued".to_string()),
-                Ok(lic) if blocked.contains_key(&lic) => {
-                    self.state.rejected.insert(lic);
-                    (false, format!("rejected: {}", blocked[&lic]))
-                }
-                Ok(lic) => {
-                    self.state.queue.push_front(lic);
-                    (true, "queued".to_string())
-                }
+                Ok(lic) => match verdicts.get(&lic) {
+                    Some((Err(why), _)) => {
+                        self.state.rejected.insert(lic);
+                        (false, format!("rejected: {why}"))
+                    }
+                    _ => {
+                        self.state.queue.push_front(lic);
+                        (true, "queued".to_string())
+                    }
+                },
                 Err(e) => (false, e),
             };
             out.push(ItemResult { id, ok, result, items: vec![] });
@@ -582,39 +593,56 @@ impl Bot {
         out
     }
 
-    /// The ids among `ids` that fail the same PICS filter as the backlog (not free, region-locked, owned,
-    /// ...): the store answers those with 403 "access denied" anyway. Ids PICS doesn't return are left to
-    /// the claim.
-    async fn unclaimable(&self, s: &Session, ids: &[Id]) -> Res<HashMap<Id, &'static str>> {
+    /// The `check` tool: each id's filter verdict and the PICS info behind it.
+    async fn check(&self, s: &Session, ids: Vec<String>) -> Vec<ItemResult> {
+        let parsed: Vec<Id> = ids.iter().filter_map(|id| id.trim().parse().ok()).collect();
+        let verdicts = self.verdicts(s, &parsed).await;
+        ids.into_iter()
+            .map(|id| {
+                let found = match (id.trim().parse::<Id>(), &verdicts) {
+                    (Err(e), _) => Err(e),
+                    (_, Err(e)) => Err(e.clone()),
+                    (Ok(lic), Ok(v)) => Ok(v.get(&lic)),
+                };
+                let (ok, result, items) = match found {
+                    Err(e) => (false, e, vec![]),
+                    Ok(Some((Ok(()), info))) => (true, "passes the filter".to_string(), vec![info.clone()]),
+                    Ok(Some((Err(why), info))) => (false, why.to_string(), vec![info.clone()]),
+                    Ok(None) => (false, "PICS returned no info".to_string(), vec![]),
+                };
+                ItemResult { id, ok, result, items }
+            })
+            .collect()
+    }
+
+    /// The same PICS filter as the backlog (not free, region-locked, owned, ...) for each of `ids` PICS
+    /// returned, with the product info it judged: the store answers failing ids with 403 "access denied".
+    async fn verdicts(&self, s: &Session, ids: &[Id]) -> Res<Verdicts> {
         let subs: Vec<u32> = ids.iter().filter_map(|id| if let Id::Sub(n) = id { Some(*n) } else { None }).collect();
         let apps: Vec<u32> = ids.iter().filter_map(|id| if let Id::App(n) = id { Some(*n) } else { None }).collect();
-        let mut locks = HashMap::new();
-        if subs.is_empty() && apps.is_empty() {
-            return Ok(locks);
-        }
-        let (packages, mut info) = self.product_info(s, &subs, &apps).await?;
-        let mut contents: Vec<u32> =
-            packages.iter().flat_map(|p| p.app_ids.iter().copied()).filter(|id| !info.contains_key(id)).collect();
-        contents.sort_unstable();
-        contents.dedup();
-        for chunk in contents.chunks(APP_CHUNK) {
+        let packages = if subs.is_empty() { Vec::new() } else { self.product_info(s, &subs, &[]).await?.0 };
+        let mut wanted: Vec<u32> =
+            packages.iter().flat_map(|p| p.app_ids.iter().copied()).chain(apps.iter().copied()).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut info = HashMap::new();
+        for chunk in wanted.chunks(APP_CHUNK) {
             info.extend(self.product_info(s, &[], chunk).await?.1);
         }
         let (now, skip) = (now(), self.skip());
+        let mut out = HashMap::new();
         for p in &packages {
             let contents: Vec<App> = p.app_ids.iter().filter_map(|id| info.get(id).cloned()).collect();
             let verdict =
                 pics::precheck(p, &s.owned, now).and_then(|()| pics::check_apps(p, &contents, &s.owned, skip));
-            if let Err(why) = verdict {
-                locks.insert(Id::Sub(p.id), why);
-            }
+            out.insert(Id::Sub(p.id), (verdict, format!("{p:?} apps: {contents:?}")));
         }
         for n in &apps {
-            if let Some(Err(why)) = info.get(n).map(|a| pics::check_app(a, &s.owned, skip)) {
-                locks.insert(Id::App(*n), why);
+            if let Some(a) = info.get(n) {
+                out.insert(Id::App(*n), (pics::check_app(a, &s.owned, skip), format!("{a:?}")));
             }
         }
-        Ok(locks)
+        Ok(out)
     }
 
     // ---- farming ----
@@ -980,8 +1008,33 @@ impl Bot {
         }
     }
 
+    /// Re-runs the filter on the next unchecked queued ids and drops the failing ones, so ids queued by an
+    /// older build or gone stale (expired, now owned, ...) don't spend claims. Not marked rejected: a later
+    /// PICS change or backfill queues them again once they pass.
+    async fn recheck_queue(&mut self, s: &Session) -> Res<()> {
+        let batch: Vec<Id> =
+            self.state.queue.iter().filter(|id| !self.checked.contains(*id)).take(100).copied().collect();
+        let verdicts = self.verdicts(s, &batch).await?;
+        self.checked.extend(batch);
+        let before = self.state.queue.len();
+        self.state.queue.retain(|id| match verdicts.get(id) {
+            Some((Err(why), _)) => {
+                info!("{id}: dropped from the queue: {why}");
+                false
+            }
+            _ => true,
+        });
+        if self.state.queue.len() != before {
+            self.save_state();
+        }
+        Ok(())
+    }
+
     /// Claims at most one queued license per call, within the token bucket.
     async fn claim_next(&mut self, s: &mut Session) -> Res<()> {
+        while self.state.queue.front().is_some_and(|id| !self.checked.contains(id)) {
+            self.recheck_queue(s).await?;
+        }
         while let Some(&id) = self.state.queue.front() {
             if !s.owns(id) {
                 break;

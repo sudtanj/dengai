@@ -219,7 +219,7 @@ async fn mcp_speaks_json_rpc_behind_the_token() {
     let (_, body) = rpc(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
     let names: Vec<&str> =
         body["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["status", "queue", "add_license", "redeem", "farm_pause", "farm_resume"]);
+    assert_eq!(names, ["status", "queue", "add_license", "redeem", "farm_pause", "farm_resume", "check"]);
 
     let (_, body) =
         rpc(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "status" } })).await;

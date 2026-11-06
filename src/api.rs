@@ -91,6 +91,8 @@ pub enum Command {
     Redeem(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
     AddLicense(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
     Queue(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
+    /// Runs the PICS filter on ids without claiming or queueing them.
+    Check(Vec<String>, oneshot::Sender<Vec<ItemResult>>),
     Login(LoginRequest),
     LoginCode(String),
 }
@@ -247,6 +249,8 @@ fn mcp_tools() -> Value {
           "inputSchema": object("keys", "Keys like AAAAA-BBBBB-CCCCC.") },
         { "name": "farm_pause", "description": "Pause card farming.", "inputSchema": none },
         { "name": "farm_resume", "description": "Resume card farming.", "inputSchema": none },
+        { "name": "check", "description": "Run the free-license filter on ids without claiming them: verdict plus the PICS info it used.",
+          "inputSchema": object("ids", "Ids like sub/123 or a/456.") },
     ] })
 }
 
@@ -274,6 +278,10 @@ async fn mcp_call(api: &Api, headers: &HeaderMap, params: &Value) -> Result<Valu
         "redeem" => {
             let keys = strings("keys")?;
             run(api, |tx| Command::Redeem(keys, tx)).await
+        }
+        "check" => {
+            let ids = strings("ids")?;
+            run(api, |tx| Command::Check(ids, tx)).await
         }
         "farm_pause" => set_paused(api.clone(), headers.clone(), true).await,
         "farm_resume" => set_paused(api.clone(), headers.clone(), false).await,
