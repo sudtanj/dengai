@@ -1069,25 +1069,50 @@ impl Bot {
                 break false;
             }
             checks += 1;
-            match crate::web::store_price(&self.http, n, &s.owned.country).await {
-                Ok(Some(price)) if price > 0 => {
-                    info!("sub/{n}: dropped from the queue: paid on the store");
-                    self.state.settle(Id::Sub(n), &Claim::Rejected("paid on the store".into()));
-                    dropped = true;
-                }
-                Ok(_) => {
-                    self.priced.insert(n);
-                }
-                Err(e) => {
-                    warn!("sub/{n}: store price check failed: {e}");
-                    break false;
-                }
+            match self.price_check(s, n).await {
+                Some(paid) => dropped |= paid,
+                None => break false,
             }
         };
+        // Spend the rest of the budget further down, so paid subs leave the queue before they reach the front.
+        let rest: Vec<u32> = self
+            .state
+            .queue
+            .iter()
+            .filter_map(|id| if let Id::Sub(n) = id { Some(*n) } else { None })
+            .filter(|n| !self.priced.contains(n))
+            .take(if ready { STORE_CHECKS - checks } else { 0 })
+            .collect();
+        for n in rest {
+            match self.price_check(s, n).await {
+                Some(paid) => dropped |= paid,
+                None => break,
+            }
+        }
         if dropped {
             self.save_state();
         }
         Ok(ready)
+    }
+
+    /// Rejects queued `sub/n` when the store sells it (`Some(true)`, state not saved), else remembers it as
+    /// priced. `None` when the store couldn't be asked.
+    async fn price_check(&mut self, s: &Session, n: u32) -> Option<bool> {
+        match crate::web::store_price(&self.http, n, &s.owned.country).await {
+            Ok(Some(price)) if price > 0 => {
+                info!("sub/{n}: dropped from the queue: paid on the store");
+                self.state.settle(Id::Sub(n), &Claim::Rejected("paid on the store".into()));
+                Some(true)
+            }
+            Ok(_) => {
+                self.priced.insert(n);
+                Some(false)
+            }
+            Err(e) => {
+                warn!("sub/{n}: store price check failed: {e}");
+                None
+            }
+        }
     }
 
     /// Claims at most one queued license per call, within the token bucket.

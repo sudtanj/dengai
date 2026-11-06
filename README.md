@@ -154,7 +154,8 @@ spend claims.
 
 PICS marks many paid store packages NoCost, and the store answers "access denied" when you try to claim
 them. So before claiming a `sub/`, dengai looks up its price with the store's `packagedetails` API (in your
-account's country, up to 20 lookups per PICS poll) and rejects it if the price is above 0. These lookups
+account's country, up to 20 lookups per PICS poll, the spare ones on subs further down the queue) and
+rejects it if the price is above 0. These lookups
 don't spend claims.
 
 The queue (`sub/<id>` and `a/<id>` entries), the done/rejected sets, the last PICS change number
