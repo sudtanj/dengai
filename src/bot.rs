@@ -49,6 +49,8 @@ const RECONNECT_MIN_SECS: u64 = 30;
 const BACKFILL_BATCH: usize = 200;
 /// Products per PICS request for apps, whose buffers are large.
 const APP_CHUNK: usize = 10;
+/// Store price checks per PICS poll: packagedetails allows roughly 200 per 5 minutes.
+const STORE_CHECKS: usize = 20;
 
 enum Exit {
     Disconnected,
@@ -91,6 +93,8 @@ pub struct Bot {
     backfill_pending: Vec<Id>,
     /// Queued ids re-checked with PICS since start; the rest are re-checked before they're claimed.
     checked: HashSet<Id>,
+    /// Queued subs the store lists as free (or not at all) since start; the rest are price-checked first.
+    priced: HashSet<u32>,
 }
 
 /// Per-connection state.
@@ -145,6 +149,7 @@ impl Bot {
             backfill_retry: 0,
             backfill_pending: Vec::new(),
             checked: HashSet::new(),
+            priced: HashSet::new(),
         })
     }
 
@@ -597,22 +602,32 @@ impl Bot {
     async fn check(&self, s: &Session, ids: Vec<String>) -> Vec<ItemResult> {
         let parsed: Vec<Id> = ids.iter().filter_map(|id| id.trim().parse().ok()).collect();
         let verdicts = self.verdicts(s, &parsed).await;
-        ids.into_iter()
-            .map(|id| {
-                let found = match (id.trim().parse::<Id>(), &verdicts) {
-                    (Err(e), _) => Err(e),
-                    (_, Err(e)) => Err(e.clone()),
-                    (Ok(lic), Ok(v)) => Ok(v.get(&lic)),
-                };
-                let (ok, result, items) = match found {
-                    Err(e) => (false, e, vec![]),
-                    Ok(Some((Ok(()), info))) => (true, "passes the filter".to_string(), vec![info.clone()]),
-                    Ok(Some((Err(why), info))) => (false, why.to_string(), vec![info.clone()]),
-                    Ok(None) => (false, "PICS returned no info".to_string(), vec![]),
-                };
-                ItemResult { id, ok, result, items }
-            })
-            .collect()
+        let mut out = Vec::new();
+        for id in ids {
+            let parsed = id.trim().parse::<Id>();
+            let found = match (&parsed, &verdicts) {
+                (Err(e), _) | (_, Err(e)) => Err(e.clone()),
+                (Ok(lic), Ok(v)) => Ok(v.get(lic)),
+            };
+            let (ok, result, items) = match found {
+                Err(e) => (false, e, vec![]),
+                Ok(Some((Ok(()), info))) => {
+                    let (ok, result) = match parsed {
+                        Ok(Id::Sub(n)) => match crate::web::store_price(&self.http, n, &s.owned.country).await {
+                            Ok(Some(price)) if price > 0 => (false, format!("paid on the store ({price})")),
+                            Ok(_) => (true, "passes the filter".to_string()),
+                            Err(e) => (true, format!("passes PICS; store price check failed: {e}")),
+                        },
+                        _ => (true, "passes the filter".to_string()),
+                    };
+                    (ok, result, vec![info.clone()])
+                }
+                Ok(Some((Err(why), info))) => (false, why.to_string(), vec![info.clone()]),
+                Ok(None) => (false, "PICS returned no info".to_string(), vec![]),
+            };
+            out.push(ItemResult { id, ok, result, items });
+        }
+        out
     }
 
     /// The same PICS filter as the backlog (not free, region-locked, owned, ...) for each of `ids` PICS
@@ -1030,18 +1045,55 @@ impl Bot {
         Ok(())
     }
 
+    /// Drops queued ids from the front until it is one worth a claim: PICS re-checked, not owned and, for a
+    /// sub, not paid on the store. False when the price-check budget or the store ran out first.
+    async fn screen_front(&mut self, s: &Session) -> Res<bool> {
+        let (mut checks, mut dropped) = (0, false);
+        let ready = loop {
+            while self.state.queue.front().is_some_and(|id| !self.checked.contains(id)) {
+                self.recheck_queue(s).await?;
+            }
+            while let Some(&id) = self.state.queue.front() {
+                if !s.owns(id) {
+                    break;
+                }
+                self.state.queue.pop_front();
+                self.state.done.insert(id);
+                dropped = true;
+            }
+            let Some(&Id::Sub(n)) = self.state.queue.front() else { break true };
+            if self.priced.contains(&n) {
+                break true;
+            }
+            if checks == STORE_CHECKS {
+                break false;
+            }
+            checks += 1;
+            match crate::web::store_price(&self.http, n, &s.owned.country).await {
+                Ok(Some(price)) if price > 0 => {
+                    info!("sub/{n}: dropped from the queue: paid on the store");
+                    self.state.settle(Id::Sub(n), &Claim::Rejected("paid on the store".into()));
+                    dropped = true;
+                }
+                Ok(_) => {
+                    self.priced.insert(n);
+                }
+                Err(e) => {
+                    warn!("sub/{n}: store price check failed: {e}");
+                    break false;
+                }
+            }
+        };
+        if dropped {
+            self.save_state();
+        }
+        Ok(ready)
+    }
+
     /// Claims at most one queued license per call, within the token bucket.
     async fn claim_next(&mut self, s: &mut Session) -> Res<()> {
-        while self.state.queue.front().is_some_and(|id| !self.checked.contains(id)) {
-            self.recheck_queue(s).await?;
-        }
-        while let Some(&id) = self.state.queue.front() {
-            if !s.owns(id) {
-                break;
-            }
-            self.state.queue.pop_front();
-            self.state.done.insert(id);
-            self.save_state();
+        if !self.screen_front(s).await? {
+            return Ok(());
         }
         let Some(&id) = self.state.queue.front() else { return Ok(()) };
         if !self.state.bucket.try_take(now()) {

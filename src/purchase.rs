@@ -86,3 +86,12 @@ pub fn classify_free_app(eresult: i32, granted: bool) -> Claim {
         _ => Claim::Rejected(format!("EResult {eresult}")),
     }
 }
+
+/// A sub's price from a `store.steampowered.com/api/packagedetails?packageids=<sub>` reply: `None` when
+/// the store doesn't list it, 0 when free. PICS marks many paid store packages NoCost; addfreelicense
+/// answers 403 for those, so a price above 0 means the claim can't work.
+pub fn store_price(body: &str, sub: u32) -> Result<Option<u64>, String> {
+    let json: serde_json::Value = serde_json::from_str(body).map_err(|_| "unreadable packagedetails reply")?;
+    let entry = json.get(sub.to_string()).ok_or("unreadable packagedetails reply")?;
+    Ok(entry.get("data").map(|d| d.pointer("/price/final").and_then(|f| f.as_u64()).unwrap_or(0)))
+}

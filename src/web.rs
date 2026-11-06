@@ -71,6 +71,17 @@ impl Web {
     }
 }
 
+/// `sub`'s store price in `country`'s currency (`None`: not listed on the store). Anonymous, no claim spent.
+pub async fn store_price(http: &reqwest::Client, sub: u32, country: &str) -> Result<Option<u64>, String> {
+    let url = format!("https://store.steampowered.com/api/packagedetails?packageids={sub}&cc={country}");
+    let resp = http.get(url).send().await.map_err(|e| e.without_url().to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    purchase::store_price(&resp.text().await.map_err(|e| e.to_string())?, sub)
+}
+
 /// Steam's clock from `ITwoFactorService/QueryTime`, for Steam Guard codes.
 pub async fn query_time(http: &reqwest::Client) -> Result<u64, String> {
     let resp = http

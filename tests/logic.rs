@@ -472,3 +472,12 @@ fn username_is_optional_without_a_password() {
     assert!(load(&[("DENGAI_PASSWORD", "x")]).unwrap_err().contains("needs DENGAI_USERNAME"));
     assert!(load(&[("DENGAI_PASSWORD", "x"), ("DENGAI_USERNAME", "bob")]).is_ok());
 }
+
+#[test]
+fn store_prices() {
+    let paid = r#"{"1605328":{"success":true,"data":{"name":"x","price":{"currency":"IDR","initial":2999900,"final":2699900}}}}"#;
+    assert_eq!(purchase::store_price(paid, 1605328), Ok(Some(2699900)));
+    assert_eq!(purchase::store_price(r#"{"7":{"success":true,"data":{"name":"x"}}}"#, 7), Ok(Some(0)));
+    assert_eq!(purchase::store_price(r#"{"7":{"success":false}}"#, 7), Ok(None));
+    assert!(purchase::store_price("null", 7).is_err());
+}

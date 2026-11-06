@@ -152,6 +152,11 @@ After each start, queued ids are run through the filter again (100 at a time, ju
 claimed) and the failing ones dropped, so entries that went stale or were queued by an older build don't
 spend claims.
 
+PICS marks many paid store packages NoCost, and the store answers "access denied" when you try to claim
+them. So before claiming a `sub/`, dengai looks up its price with the store's `packagedetails` API (in your
+account's country, up to 20 lookups per PICS poll) and rejects it if the price is above 0. These lookups
+don't spend claims.
+
 The queue (`sub/<id>` and `a/<id>` entries), the done/rejected sets, the last PICS change number
 and the backfill time are kept in `data_dir/state.json` (written atomically).
 
