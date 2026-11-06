@@ -215,6 +215,18 @@ and `login_error`.
  "recent_claims":[{"id":"sub/123","result":"ok","at":1767225600}]}
 ```
 
+## MCP
+
+`POST /mcp` is an [MCP](https://modelcontextprotocol.io) server (stateless Streamable HTTP, JSON replies, no
+sessions or SSE) behind the same bearer token, so an MCP gateway can inspect and debug the bot. Tools: `status`,
+`queue` and `add_license` (`ids`), `redeem` (`keys`), `farm_pause`, `farm_resume`. They return what the matching HTTP
+endpoint returns, as text. Login is not exposed.
+
+```sh
+curl -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' $API/mcp
+```
+
 ## Docker (Orange Pi Zero 3)
 
 Multi-arch images (`linux/arm64`, `linux/amd64`) are published to Docker Hub as `sudtanj/dengai`

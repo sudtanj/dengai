@@ -8,7 +8,7 @@ use axum::http::{
     header::{AUTHORIZATION, CONTENT_SECURITY_POLICY},
     HeaderMap, StatusCode,
 };
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,7 @@ pub fn router(token: String, shared: Shared, tx: mpsc::Sender<Command>, pause: w
         .route("/queue", post(queue))
         .route("/farm/pause", post(pause_farm))
         .route("/farm/resume", post(resume_farm))
+        .route("/mcp", post(mcp))
         .with_state(api)
 }
 
@@ -223,6 +224,106 @@ async fn pause_farm(State(api): State<Api>, headers: HeaderMap) -> Reply {
 
 async fn resume_farm(State(api): State<Api>, headers: HeaderMap) -> Reply {
     set_paused(api, headers, false).await
+}
+
+/// A JSON-RPC error: code and message.
+type RpcError = (i32, String);
+
+const MCP_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+fn mcp_tools() -> Value {
+    let object = |field: &str, what: &str| {
+        let list = json!({ "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_ITEMS, "description": what });
+        json!({ "type": "object", "properties": { field: list }, "required": [field] })
+    };
+    let none = json!({ "type": "object", "properties": {} });
+    json!({ "tools": [
+        { "name": "status", "description": "Login state, farming game, claim queue and recent claims.", "inputSchema": none },
+        { "name": "queue", "description": "Put free-license ids at the front of the auto-claim queue.",
+          "inputSchema": object("ids", "Ids like sub/123 or a/456.") },
+        { "name": "add_license", "description": "Claim free licenses now.",
+          "inputSchema": object("ids", "Ids like sub/123 or a/456.") },
+        { "name": "redeem", "description": "Redeem Steam product keys.",
+          "inputSchema": object("keys", "Keys like AAAAA-BBBBB-CCCCC.") },
+        { "name": "farm_pause", "description": "Pause card farming.", "inputSchema": none },
+        { "name": "farm_resume", "description": "Resume card farming.", "inputSchema": none },
+    ] })
+}
+
+/// Runs a tool through the same code as its HTTP endpoint; a failed run is a tool error, not a protocol error.
+async fn mcp_call(api: &Api, headers: &HeaderMap, params: &Value) -> Result<Value, RpcError> {
+    let bad = |msg: String| (-32602, msg);
+    let name = params["name"].as_str().ok_or_else(|| bad("missing tool name".into()))?;
+    let args = &params["arguments"];
+    let strings = |field: &str| {
+        serde_json::from_value::<Vec<String>>(args[field].clone())
+            .ok()
+            .filter(|v| (1..=MAX_ITEMS).contains(&v.len()))
+            .ok_or_else(|| bad(format!("{field} must be 1 to {MAX_ITEMS} strings")))
+    };
+    let (status, Json(body)) = match name {
+        "status" => status(State(api.clone()), headers.clone()).await,
+        "queue" => {
+            let ids = strings("ids")?;
+            run(api, |tx| Command::Queue(ids, tx)).await
+        }
+        "add_license" => {
+            let ids = strings("ids")?;
+            run(api, |tx| Command::AddLicense(ids, tx)).await
+        }
+        "redeem" => {
+            let keys = strings("keys")?;
+            run(api, |tx| Command::Redeem(keys, tx)).await
+        }
+        "farm_pause" => set_paused(api.clone(), headers.clone(), true).await,
+        "farm_resume" => set_paused(api.clone(), headers.clone(), false).await,
+        _ => return Err(bad(format!("unknown tool {name}"))),
+    };
+    Ok(json!({
+        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap_or_default() }],
+        "isError": !status.is_success(),
+    }))
+}
+
+/// MCP over stateless Streamable HTTP: one JSON-RPC message in, one JSON reply out.
+async fn mcp(State(api): State<Api>, headers: HeaderMap, body: Bytes) -> Response {
+    if !authorized(&api, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let reply = |id: Value, outcome: Result<Value, RpcError>| {
+        let mut msg = json!({ "jsonrpc": "2.0", "id": id });
+        match outcome {
+            Ok(result) => msg["result"] = result,
+            Err((code, message)) => msg["error"] = json!({ "code": code, "message": message }),
+        }
+        Json(msg).into_response()
+    };
+    let Ok(msg) = serde_json::from_slice::<Value>(&body) else {
+        return reply(Value::Null, Err((-32700, "parse error".into())));
+    };
+    let Some(id) = msg.get("id").cloned() else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let params = &msg["params"];
+    let outcome = match msg["method"].as_str() {
+        Some("initialize") => {
+            let asked = params["protocolVersion"].as_str().unwrap_or_default();
+            Ok(json!({
+                "protocolVersion": MCP_VERSIONS.iter().find(|v| **v == asked).unwrap_or(&MCP_VERSIONS[0]),
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "dengai", "version": env!("CARGO_PKG_VERSION") },
+            }))
+        }
+        Some("ping") => Ok(json!({})),
+        Some("tools/list") => Ok(mcp_tools()),
+        Some("tools/call") => mcp_call(&api, &headers, params).await,
+        Some(other) => Err((-32601, format!("method not found: {other}"))),
+        None => Err((-32600, "invalid request".into())),
+    };
+    if let Err((code, message)) = &outcome {
+        tracing::debug!("mcp error {code}: {message}");
+    }
+    reply(id, outcome)
 }
 
 async fn index() -> impl IntoResponse {

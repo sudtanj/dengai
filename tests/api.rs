@@ -195,3 +195,59 @@ async fn login_code_only_while_steam_asks() {
     assert_eq!(status, StatusCode::ACCEPTED);
     assert!(matches!(rx.recv().await, Some(Command::LoginCode(c)) if c == "AB12C"));
 }
+
+#[tokio::test]
+async fn mcp_speaks_json_rpc_behind_the_token() {
+    let (app, _rx, _pause) = setup();
+    let rpc = |body: Value| {
+        let app = app.clone();
+        async move { post(app, "/mcp", Some(TOKEN), &body.to_string()).await }
+    };
+
+    let (status, body) = post(app.clone(), "/mcp", None, r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({ "error": "unauthorized" }));
+
+    let (status, body) = rpc(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-03-26" } }))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], 1);
+    assert_eq!(body["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(body["result"]["serverInfo"]["name"], "dengai");
+
+    let (_, body) = rpc(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
+    let names: Vec<&str> = body["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["status", "queue", "add_license", "redeem", "farm_pause", "farm_resume"]);
+
+    let (_, body) = rpc(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "status" } })).await;
+    assert_eq!(body["result"]["isError"], false);
+    let text: Value = serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text["farm_paused"], false);
+
+    let (_, body) = rpc(json!({ "jsonrpc": "2.0", "id": 4, "method": "nope" })).await;
+    assert_eq!(body["error"]["code"], -32601);
+
+    let (_, body) = rpc(json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": { "name": "queue", "arguments": { "ids": [] } } }))
+    .await;
+    assert_eq!(body["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn mcp_notifications_get_202_and_get_is_not_allowed() {
+    let (app, _rx, _pause) = setup();
+    let req = |method: &str, body: &'static str| {
+        Request::builder()
+            .method(method)
+            .uri("/mcp")
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let resp = app.clone().oneshot(req("POST", r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert!(to_bytes(resp.into_body(), usize::MAX).await.unwrap().is_empty());
+    let resp = app.oneshot(req("GET", "")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
