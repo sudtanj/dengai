@@ -298,22 +298,22 @@ Ready 11.95 ms after spawn (API accepting requests).
 ### x86_64
 
 <!-- bench:report-x86_64 -->
-Measured on x86_64 at commit `7b968e6`. Binary 4.9 MiB. There is no Steam account in the benchmark: the bot waits for a login on the setup page, and the load is 5000 requests per level, alternating `GET /status` (with the token) and the open `GET /`, so the numbers do not depend on Steam. Client and server share the machine and the server runs on a single-threaded Tokio runtime.
+Measured on x86_64 at commit `10e7893`. Binary 4.9 MiB. There is no Steam account in the benchmark: the bot waits for a login on the setup page, and the load is 5000 requests per level, alternating `GET /status` (with the token) and the open `GET /`, so the numbers do not depend on Steam. Client and server share the machine and the server runs on a single-threaded Tokio runtime.
 
-Ready 11.85 ms after spawn (API accepting requests).
+Ready 11.78 ms after spawn (API accepting requests).
 
 | State | RSS | Threads |
 |---|---:|---:|
-| Idle, 2 s after start | 7.2 MiB | 2 |
-| Idle, 2 s after the load runs | 8.3 MiB | 2 |
-| Peak for the whole run (VmHWM) | 8.3 MiB | |
+| Idle, 2 s after start | 7.3 MiB | 2 |
+| Idle, 2 s after the load runs | 8.4 MiB | 2 |
+| Peak for the whole run (VmHWM) | 8.4 MiB | |
 
 | Concurrency | Requests | Errors | Req/s | p50 | p99 | Peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | 200 | 0 | 9992 | 0.10 ms | 0.14 ms | 7.2 MiB |
-| 1 | 5000 | 0 | 11096 | 0.09 ms | 0.13 ms | 7.2 MiB |
-| 10 | 5000 | 0 | 41606 | 0.23 ms | 0.31 ms | 7.3 MiB |
-| 50 | 5000 | 0 | 46462 | 1.08 ms | 2.26 ms | 8.3 MiB |
+| 1 | 200 | 0 | 26787 | 0.04 ms | 0.06 ms | 7.3 MiB |
+| 1 | 5000 | 0 | 28774 | 0.03 ms | 0.05 ms | 7.3 MiB |
+| 10 | 5000 | 0 | 70940 | 0.14 ms | 0.20 ms | 7.4 MiB |
+| 50 | 5000 | 0 | 71880 | 0.52 ms | 1.52 ms | 8.4 MiB |
 <!-- /bench:report-x86_64 -->
 
 ## Build
