@@ -217,10 +217,12 @@ async fn mcp_speaks_json_rpc_behind_the_token() {
     assert_eq!(body["result"]["serverInfo"]["name"], "dengai");
 
     let (_, body) = rpc(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
-    let names: Vec<&str> = body["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> =
+        body["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["status", "queue", "add_license", "redeem", "farm_pause", "farm_resume"]);
 
-    let (_, body) = rpc(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "status" } })).await;
+    let (_, body) =
+        rpc(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "status" } })).await;
     assert_eq!(body["result"]["isError"], false);
     let text: Value = serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(text["farm_paused"], false);
@@ -245,7 +247,8 @@ async fn mcp_notifications_get_202_and_get_is_not_allowed() {
             .body(Body::from(body))
             .unwrap()
     };
-    let resp = app.clone().oneshot(req("POST", r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)).await.unwrap();
+    let resp =
+        app.clone().oneshot(req("POST", r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     assert!(to_bytes(resp.into_body(), usize::MAX).await.unwrap().is_empty());
     let resp = app.oneshot(req("GET", "")).await.unwrap();
