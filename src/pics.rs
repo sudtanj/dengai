@@ -182,14 +182,32 @@ pub fn precheck(p: &Package, owned: &Owned, now: u64) -> Result<(), &'static str
     if p.must_own_app > 0 && !owned.apps.contains(&p.must_own_app) {
         return Err("missing a required app");
     }
+    package_region(p, &owned.country)
+}
+
+/// The package's own country locks for an account in `country`.
+pub fn package_region(p: &Package, country: &str) -> Result<(), &'static str> {
     if let Some(list) = &p.restricted_countries {
-        if listed(list, &owned.country) != p.only_allow_restricted {
+        if listed(list, country) != p.only_allow_restricted {
             return Err("region restricted");
         }
     }
     if let Some(list) = &p.purchase_restricted_countries {
-        if listed(list, &owned.country) != p.allow_purchase_from_restricted {
+        if listed(list, country) != p.allow_purchase_from_restricted {
             return Err("purchase restricted in region");
+        }
+    }
+    Ok(())
+}
+
+/// An app's country locks for an account in `country`.
+pub fn app_region(app: &App, country: &str) -> Result<(), &'static str> {
+    if app.restricted_countries.as_deref().is_some_and(|l| listed(l, country)) {
+        return Err("app region restricted");
+    }
+    if let Some(list) = &app.purchase_restricted_countries {
+        if listed(list, country) != app.allow_purchase_from_restricted {
+            return Err("app purchase restricted in region");
         }
     }
     Ok(())
@@ -219,14 +237,7 @@ fn app_rules(app: &App, owned: &Owned, included: &[u32], skip: Skip) -> Result<(
     if app.must_own_app > 0 && !has(app.must_own_app) {
         return Err("app needs another app");
     }
-    if app.restricted_countries.as_deref().is_some_and(|l| listed(l, &owned.country)) {
-        return Err("app region restricted");
-    }
-    if let Some(list) = &app.purchase_restricted_countries {
-        if listed(list, &owned.country) != app.allow_purchase_from_restricted {
-            return Err("app purchase restricted in region");
-        }
-    }
+    app_region(app, &owned.country)?;
     match app.kind.as_str() {
         "demo" if skip.demos => Err("demo (skipped)"),
         "beta" if skip.playtests => Err("playtest (skipped)"),

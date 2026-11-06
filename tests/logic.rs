@@ -197,6 +197,11 @@ fn pics_package_filter() {
         pics::precheck(&p, &Owned { country: "DE".into(), ..owned.clone() }, now),
         Err("purchase restricted in region")
     );
+    assert_eq!(pics::package_region(&p, "de"), Err("purchase restricted in region"));
+    assert_eq!(pics::package_region(&p, "ID"), Ok(()));
+    let locked = App { restricted_countries: Some(vec!["ID".into()]), ..app.clone() };
+    assert_eq!(pics::app_region(&locked, "ID"), Err("app region restricted"));
+    assert_eq!(pics::app_region(&locked, "US"), Ok(()));
     // dontgrantifappidowned.
     owned.apps.insert(730);
     assert_eq!(pics::precheck(&p, &owned, now), Err("owns an excluding app"));

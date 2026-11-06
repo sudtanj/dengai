@@ -461,7 +461,8 @@ impl Bot {
                 let _ = reply.send(r);
             }
             Command::Queue(ids, reply) => {
-                let _ = reply.send(self.queue_licenses(ids));
+                let r = self.queue_licenses(s, ids).await;
+                let _ = reply.send(r);
             }
             Command::Login(_) | Command::LoginCode(_) => {}
         }
@@ -547,13 +548,28 @@ impl Bot {
     }
 
     /// Puts licenses at the front of the auto-claim queue, ahead of the PICS backlog, since promos
-    /// expire. They are claimed within `claims_per_hour` and the rate-limit back-off.
-    fn queue_licenses(&mut self, ids: Vec<String>) -> Vec<ItemResult> {
+    /// expire. They are claimed within `claims_per_hour` and the rate-limit back-off. Ones locked out of
+    /// the account's country are rejected up front so they don't sit in the queue.
+    async fn queue_licenses(&mut self, s: &mut Session, ids: Vec<String>) -> Vec<ItemResult> {
+        let ids: Vec<String> = ids.iter().map(|raw| raw.trim().to_string()).collect();
+        let fresh: Vec<Id> =
+            ids.iter().filter_map(|id| id.parse::<Id>().ok()).filter(|id| !self.state.known(*id)).collect();
+        let blocked = match self.region_locks(s, &fresh).await {
+            Ok(b) => b,
+            Err(e) => {
+                // The claim itself still gets Steam's "not available in your country".
+                warn!("queue: region check skipped: {e}");
+                HashMap::new()
+            }
+        };
         let mut out = Vec::new();
-        for raw in ids {
-            let id = raw.trim().to_string();
+        for id in ids {
             let (ok, result) = match id.parse::<Id>() {
                 Ok(lic) if self.state.known(lic) => (false, "already claimed, rejected or queued".to_string()),
+                Ok(lic) if blocked.contains_key(&lic) => {
+                    self.state.rejected.insert(lic);
+                    (false, format!("rejected: {} ({})", blocked[&lic], s.owned.country))
+                }
                 Ok(lic) => {
                     self.state.queue.push_front(lic);
                     (true, "queued".to_string())
@@ -564,6 +580,39 @@ impl Bot {
         }
         self.save_state();
         out
+    }
+
+    /// The ids among `ids` that PICS says the account's country can't see or buy (a package also when one
+    /// of its apps is locked). Ids PICS doesn't return are left to the claim.
+    async fn region_locks(&self, s: &Session, ids: &[Id]) -> Res<HashMap<Id, &'static str>> {
+        let country = s.owned.country.as_str();
+        let subs: Vec<u32> = ids.iter().filter_map(|id| if let Id::Sub(n) = id { Some(*n) } else { None }).collect();
+        let apps: Vec<u32> = ids.iter().filter_map(|id| if let Id::App(n) = id { Some(*n) } else { None }).collect();
+        let mut locks = HashMap::new();
+        if subs.is_empty() && apps.is_empty() {
+            return Ok(locks);
+        }
+        let (packages, mut info) = self.product_info(s, &subs, &apps).await?;
+        let mut contents: Vec<u32> =
+            packages.iter().flat_map(|p| p.app_ids.iter().copied()).filter(|id| !info.contains_key(id)).collect();
+        contents.sort_unstable();
+        contents.dedup();
+        for chunk in contents.chunks(APP_CHUNK) {
+            info.extend(self.product_info(s, &[], chunk).await?.1);
+        }
+        let app_region = |id: &u32| info.get(id).map_or(Ok(()), |a| pics::app_region(a, country));
+        for p in &packages {
+            let locked = pics::package_region(p, country).and_then(|()| p.app_ids.iter().try_for_each(app_region));
+            if let Err(why) = locked {
+                locks.insert(Id::Sub(p.id), why);
+            }
+        }
+        for n in &apps {
+            if let Err(why) = app_region(n) {
+                locks.insert(Id::App(*n), why);
+            }
+        }
+        Ok(locks)
     }
 
     // ---- farming ----

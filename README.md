@@ -190,7 +190,9 @@ curl -H "$AUTH" -d '{"keys":["AAAAA-BBBBB-CCCCC"]}' $API/redeem
 curl -H "$AUTH" -d '{"ids":["sub/123","a/456"]}' $API/addlicense
 
 # same ids, claimed later: put at the front of the auto-claim queue, paced by claims_per_hour and
-# the rate-limit back-off; answers "queued" or "already claimed, rejected or queued" per id
+# the rate-limit back-off; answers "queued" or "already claimed, rejected or queued" per id.
+# Ids that PICS shows locked out of your country (the package, its apps, or the app) are rejected
+# instead of queued.
 curl -H "$AUTH" -d '{"ids":["sub/123","a/456"]}' $API/queue
 
 curl -H "$AUTH" -X POST $API/farm/pause
