@@ -311,6 +311,9 @@ fn state_and_bucket() {
     assert!(s.enqueue(Id::App(5)), "a/5 and sub/5 are different licenses");
     s.rejected.insert(Id::Sub(6));
     assert!(!s.enqueue(Id::Sub(6)));
+    assert!(s.enqueue(Id::Sub(7)));
+    assert_eq!(s.queue, [Id::Sub(5), Id::Sub(7), Id::App(5)], "subs go ahead of apps");
+    s.queue.retain(|id| *id != Id::Sub(7));
     let dir = std::env::temp_dir().join(format!("dengai-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("state.json");
@@ -319,8 +322,12 @@ fn state_and_bucket() {
     let loaded = State::load(&path).unwrap();
     assert_eq!((loaded.change_number, loaded.queue.len(), loaded.rejected.len()), (42, 2, 1));
     assert_eq!(loaded.queue, [Id::Sub(5), Id::App(5)]);
-    std::fs::write(&path, r#"{"queue":["sub/5","a/5","sub/5","sub/6","a/5"],"done":["sub/6"]}"#).unwrap();
-    assert_eq!(State::load(&path).unwrap().queue, [Id::Sub(5), Id::App(5)], "duplicates and done ids drop");
+    std::fs::write(&path, r#"{"queue":["a/5","sub/5","a/5","sub/6","a/1","sub/7"],"done":["sub/6"]}"#).unwrap();
+    assert_eq!(
+        State::load(&path).unwrap().queue,
+        [Id::Sub(5), Id::Sub(7), Id::App(5), Id::App(1)],
+        "duplicates and done ids drop, subs move ahead"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 
     let mut b = TokenBucket::new(30, 1000);

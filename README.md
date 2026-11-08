@@ -155,8 +155,10 @@ spend claims.
 PICS marks many paid store packages NoCost, and the store answers "access denied" when you try to claim
 them. So before claiming a `sub/`, dengai looks up its price with the store's `packagedetails` API (in your
 account's country, up to 20 lookups per PICS poll, the spare ones on subs further down the queue) and
-rejects it if the price is above 0. These lookups
-don't spend claims.
+rejects it if the price is above 0. These lookups don't spend claims.
+
+Queued `sub/` entries are claimed before any `a/` entry, because time-limited free promos are packages
+while queued apps are mostly demos and free-to-play games that stay free. Ids sent to `/queue` go first.
 
 The queue (`sub/<id>` and `a/<id>` entries), the done/rejected sets, the last PICS change number
 and the backfill time are kept in `data_dir/state.json` (written atomically).

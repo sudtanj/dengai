@@ -106,13 +106,15 @@ pub const MAX_RETRIES: u8 = 5;
 
 impl State {
     /// Loads the state, or an empty one when the file doesn't exist. Drops duplicate queue entries
-    /// and ones already claimed or rejected, which older versions could leave behind.
+    /// and ones already claimed or rejected, which older versions could leave behind, and moves subs
+    /// ahead of apps (see `enqueue`).
     pub fn load(path: &Path) -> Result<State, String> {
         match std::fs::read(path) {
             Ok(b) => {
                 let mut s: State = serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", path.display()))?;
                 let (done, rejected, mut seen) = (&s.done, &s.rejected, BTreeSet::new());
                 s.queue.retain(|id| !done.contains(id) && !rejected.contains(id) && seen.insert(*id));
+                s.queue.make_contiguous().sort_by_key(|id| matches!(id, Id::App(_)));
                 Ok(s)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
@@ -134,11 +136,16 @@ impl State {
         self.done.contains(&id) || self.rejected.contains(&id) || self.queue.contains(&id)
     }
 
-    /// Queues a license unless it is already known. Returns whether it was added.
+    /// Queues a license unless it is already known. Returns whether it was added. Subs go ahead of
+    /// all apps: time-limited free promos are subs, while apps are demos and free-to-play games.
     pub fn enqueue(&mut self, id: Id) -> bool {
         let new = !self.known(id);
         if new {
-            self.queue.push_back(id);
+            let at = match id {
+                Id::Sub(_) => self.queue.iter().position(|q| matches!(q, Id::App(_))).unwrap_or(self.queue.len()),
+                Id::App(_) => self.queue.len(),
+            };
+            self.queue.insert(at, id);
         }
         new
     }
