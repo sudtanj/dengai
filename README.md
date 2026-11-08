@@ -4,7 +4,7 @@ A tiny stand-in for [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamF
 Steam account, built to run all the time on a 1 GB board such as the Orange Pi Zero 3. One static
 binary, one process per account, no plugins, no web UI.
 
-<!-- bench:summary -->Measured on aarch64: a 4.4 MiB binary whose API is ready 11.86 ms after start and that idles at 6.3 MiB RSS with 2 thread(s); 50 concurrent API requests peak at 7.4 MiB (see [Benchmark](#benchmark)).<!-- /bench:summary -->
+<!-- bench:summary -->Measured on aarch64: a 4.4 MiB binary whose API is ready 11.99 ms after start and that idles at 6.3 MiB RSS with 2 thread(s); 50 concurrent API requests peak at 7.4 MiB (see [Benchmark](#benchmark)).<!-- /bench:summary -->
 
 What it does:
 
@@ -285,9 +285,9 @@ slower cores will add latency under load; memory carries over.
 ### arm64 (aarch64)
 
 <!-- bench:report-aarch64 -->
-Measured on aarch64 at commit `10cdce6`. Binary 4.4 MiB. There is no Steam account in the benchmark: the bot waits for a login on the setup page, and the load is 5000 requests per level, alternating `GET /status` (with the token) and the open `GET /`, so the numbers do not depend on Steam. Client and server share the machine and the server runs on a single-threaded Tokio runtime.
+Measured on aarch64 at commit `b38406f`. Binary 4.4 MiB. There is no Steam account in the benchmark: the bot waits for a login on the setup page, and the load is 5000 requests per level, alternating `GET /status` (with the token) and the open `GET /`, so the numbers do not depend on Steam. Client and server share the machine and the server runs on a single-threaded Tokio runtime.
 
-Ready 11.86 ms after spawn (API accepting requests).
+Ready 11.99 ms after spawn (API accepting requests).
 
 | State | RSS | Threads |
 |---|---:|---:|
@@ -297,10 +297,10 @@ Ready 11.86 ms after spawn (API accepting requests).
 
 | Concurrency | Requests | Errors | Req/s | p50 | p99 | Peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | 200 | 0 | 18894 | 0.05 ms | 0.07 ms | 6.3 MiB |
-| 1 | 5000 | 0 | 18160 | 0.05 ms | 0.07 ms | 6.3 MiB |
-| 10 | 5000 | 0 | 46257 | 0.20 ms | 0.26 ms | 6.5 MiB |
-| 50 | 5000 | 0 | 50669 | 1.00 ms | 1.61 ms | 7.4 MiB |
+| 1 | 200 | 0 | 19291 | 0.05 ms | 0.07 ms | 6.3 MiB |
+| 1 | 5000 | 0 | 18306 | 0.05 ms | 0.07 ms | 6.3 MiB |
+| 10 | 5000 | 0 | 51706 | 0.18 ms | 0.26 ms | 6.5 MiB |
+| 50 | 5000 | 0 | 48387 | 1.03 ms | 1.71 ms | 7.4 MiB |
 <!-- /bench:report-aarch64 -->
 
 ### x86_64
