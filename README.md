@@ -83,8 +83,9 @@ dengai logs an error and idles.
 
 The username is saved next to the refresh token. The password is never saved or logged. A
 `shared_secret` entered on the page is saved in the data dir (mode 0600), and later sign-ins fill the
-Steam Guard code from it. When Steam rejects the refresh token (it expires after a few months) dengai
-goes back to `needs_login` and you sign in again. `/login` accepts one attempt per 10 seconds.
+Steam Guard code from it. When Steam rejects the refresh token (access denied, expired or revoked; it
+expires after a few months) dengai goes back to `needs_login` and you sign in again. Other logon errors,
+such as a busy or unavailable Steam server, are retried with the reconnect back-off. `/login` accepts one attempt per 10 seconds.
 
 Setting `DENGAI_USERNAME` and `DENGAI_PASSWORD` (with `DENGAI_SHARED_SECRET` or `DENGAI_GUARD_CODE`) in
 the environment still works for headless setups, exactly as below.

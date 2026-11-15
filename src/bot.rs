@@ -270,10 +270,18 @@ impl Bot {
         if let Some(token) = token {
             match Connection::access(&servers, &username, token.trim()).await {
                 Ok(c) => return Ok(c),
+                // Only codes that mean the token itself is dead. Others (TryAnotherCM, ServiceUnavailable,
+                // Busy, ...) are transient and get the reconnect back-off instead of a wait for the page.
                 Err(
                     e @ (ConnectionError::AccessToken(_)
-                    | ConnectionError::LoginError(LoginError::InvalidCredentials | LoginError::Unknown(_))),
-                ) => warn!("saved refresh token rejected ({e}), signing in again"),
+                    | ConnectionError::LoginError(
+                        LoginError::InvalidCredentials
+                        | LoginError::Unknown(EResult::AccessDenied | EResult::Expired | EResult::Revoked),
+                    )),
+                ) => {
+                    warn!("saved refresh token rejected ({e}), signing in again");
+                    self.status(|s| s.login_error = Some(format!("saved login rejected by Steam: {e}")));
+                }
                 Err(e) => return Err(format!("connecting with the saved refresh token: {e}")),
             }
         }
