@@ -71,7 +71,7 @@ impl Default for Config {
             auto_claim_apps: true,
             pics_poll_secs: 60,
             claims_per_hour: 30,
-            skip_demos: false,
+            skip_demos: true,
             skip_playtests: false,
             skip_unowned_dlc: true,
             backfill_url: String::new(),

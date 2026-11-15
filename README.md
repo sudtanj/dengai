@@ -113,7 +113,7 @@ the key name shown, or with an environment variable `DENGAI_<KEY>` (upper case),
 | `auto_claim_apps` | `true` | Also auto-claim free apps (`a/<id>`), not only packages. |
 | `pics_poll_secs` | `60` | Seconds between PICS change polls (min 30). |
 | `claims_per_hour` | `30` | Token-bucket size for automatic claims. |
-| `skip_demos` | `false` | Don't auto-claim packages containing demos. |
+| `skip_demos` | `true` | Don't auto-claim demos (Steam doesn't count them as games). |
 | `skip_playtests` | `false` | Don't auto-claim packages containing playtests. |
 | `skip_unowned_dlc` | `true` | Don't auto-claim DLC for games you don't own. |
 | `backfill_url` | empty (off) | URL of a list of free `sub/<id>` / `a/<id>` to check and queue, see [First start](#first-start-and-backfill). |
@@ -126,7 +126,7 @@ Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. Example `dengai.toml`:
 username = "myaccount"
 shared_secret = "base64secret="
 api_token = "change-me-to-a-long-random-token"
-skip_demos = true
+skip_demos = false
 claims_per_hour = 20
 ```
 
